@@ -165,7 +165,7 @@ fn children_of(conn: &Connection, parent_id: &str) -> Result<Vec<Goal>> {
     Ok(goals)
 }
 
-fn collect_subtree(conn: &Connection, root_id: &str) -> Result<Vec<Goal>> {
+pub fn collect_subtree(conn: &Connection, root_id: &str) -> Result<Vec<Goal>> {
     let root = {
         let mut stmt = conn.prepare(
             "SELECT id, parent_id, body, achieved FROM goals WHERE id = ?1",

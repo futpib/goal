@@ -41,9 +41,9 @@ Taskwarrior's `undo` is a global last-action undo. `goal undone` directly target
 
 | | Taskwarrior | `goal` |
 |---|---|---|
-| Default list | `task list` / `task next` | `goal list` |
+| Default list | `task list` / `task next` | `goal list` (also: `goal` with no args) |
 | Filtered | `task +tag project:X list` | — |
-| Single item | `task 1 info` | — |
+| Single item + subtree | `task 1 info` | `goal info <id>` |
 
 ## Undo / History
 
@@ -58,4 +58,3 @@ Taskwarrior's `undo` is a global last-action undo. `goal undone` directly target
 ## Notable gaps in `goal`
 
 - No filtering/querying
-- No way to view a single goal's detail or subtree

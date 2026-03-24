@@ -408,6 +408,42 @@ fn log_after_undo_removes_entry() {
 }
 
 #[test]
+fn info_single_goal() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "learn rust"])).trim().to_string();
+    let out = goal(dir.path(), &["info", &id]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let s = stdout(&out);
+    assert!(s.contains(&id));
+    assert!(s.contains("learn rust"));
+    assert!(s.contains("achievable"));
+    assert!(s.contains("not achieved"));
+    assert!(s.contains("depth:  0"));
+}
+
+#[test]
+fn info_with_subtree() {
+    let dir = TempDir::new().unwrap();
+    let parent = stdout(&goal(dir.path(), &["add", "parent goal"])).trim().to_string();
+    let child = stdout(&goal(dir.path(), &["add", "child goal", "--parent", &parent])).trim().to_string();
+    let out = goal(dir.path(), &["info", &parent]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let s = stdout(&out);
+    assert!(s.contains("subtree"));
+    assert!(s.contains(&child));
+    assert!(s.contains("child goal"));
+}
+
+#[test]
+fn info_short_prefix() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "my goal"])).trim().to_string();
+    let out = goal(dir.path(), &["info", &id[..4]]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("my goal"));
+}
+
+#[test]
 fn nonexistent_id_errors() {
     let dir = TempDir::new().unwrap();
 
@@ -416,4 +452,16 @@ fn nonexistent_id_errors() {
 
     let rm = goal(dir.path(), &["delete", "a0nonexistent"]);
     assert!(!rm.status.success());
+}
+
+#[test]
+fn no_args_shows_list() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "default list goal"])).trim().to_string();
+
+    let out = goal(dir.path(), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let s = stdout(&out);
+    assert!(s.contains(&id));
+    assert!(s.contains("default list goal"));
 }

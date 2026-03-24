@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 #[command(name = "goal", about = "Hierarchical goal tracker")]
 pub struct Args {
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -37,6 +37,9 @@ pub enum Command {
         achievable: bool,
     },
     Delete {
+        id: String,
+    },
+    Info {
         id: String,
     },
     Undo,

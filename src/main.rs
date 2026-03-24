@@ -12,7 +12,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let conn = db::open_db()?;
 
-    match args.command {
+    match args.command.unwrap_or(Command::List) {
         Command::Add { description, parent, continuous } => {
             let kind = if continuous {
                 db::GoalKind::Continuous
@@ -61,6 +61,11 @@ fn main() -> Result<()> {
         Command::Delete { id } => {
             let full_id = db::resolve_id(&conn, &id)?;
             db::remove_goal(&conn, &full_id)?;
+        }
+        Command::Info { id } => {
+            let full_id = db::resolve_id(&conn, &id)?;
+            let subtree = db::collect_subtree(&conn, &full_id)?;
+            display::print_info(&subtree);
         }
         Command::Undo => {
             db::undo_last(&conn)?;
