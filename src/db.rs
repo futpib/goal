@@ -21,6 +21,14 @@ pub struct Goal {
     pub kind: GoalKind,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Annotation {
+    pub id: String,
+    pub goal_id: String,
+    pub body: String,
+    pub created_at: String,
+}
+
 pub struct Event {
     pub event_id: String,
     pub timestamp: String,
@@ -137,9 +145,25 @@ pub fn open_db() -> Result<Connection> {
             op         TEXT NOT NULL,
             snapshot   TEXT NOT NULL,
             new_id     TEXT
+        );
+        CREATE TABLE IF NOT EXISTS annotations (
+            id         TEXT PRIMARY KEY,
+            goal_id    TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+            body       TEXT NOT NULL,
+            created_at TEXT NOT NULL
         );",
     )?;
     Ok(conn)
+}
+
+pub fn get_goal(conn: &Connection, id: &str) -> Result<Goal> {
+    let mut stmt = conn.prepare(
+        "SELECT id, parent_id, body, achieved FROM goals WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query_map([id], row_to_goal)?;
+    rows.next()
+        .ok_or_else(|| anyhow::anyhow!("no goal with id '{}'", id))?
+        .map_err(Into::into)
 }
 
 pub fn resolve_id(conn: &Connection, prefix: &str) -> Result<String> {
@@ -468,4 +492,69 @@ pub fn all_goals(conn: &Connection) -> Result<Vec<Goal>> {
         .query_map([], row_to_goal)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(goals)
+}
+
+fn generate_annotation_id() -> String {
+    let mut bytes = [0u8; 8];
+    rand::rng().fill(&mut bytes);
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    format!("n{}", &hex[..15])
+}
+
+pub fn add_annotation(conn: &Connection, goal_id: &str, body: &str) -> Result<String> {
+    let id = generate_annotation_id();
+    conn.execute(
+        "INSERT INTO annotations (id, goal_id, body, created_at) VALUES (?1, ?2, ?3, datetime('now'))",
+        rusqlite::params![id, goal_id, body],
+    )?;
+    Ok(id)
+}
+
+pub fn edit_annotation(conn: &Connection, ann_id: &str, body: &str) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE annotations SET body = ?1 WHERE id = ?2",
+        rusqlite::params![body, ann_id],
+    )?;
+    if changed == 0 {
+        bail!("no annotation with id '{}'", ann_id);
+    }
+    Ok(())
+}
+
+pub fn delete_annotation(conn: &Connection, ann_id: &str) -> Result<()> {
+    let changed = conn.execute("DELETE FROM annotations WHERE id = ?1", [ann_id])?;
+    if changed == 0 {
+        bail!("no annotation with id '{}'", ann_id);
+    }
+    Ok(())
+}
+
+pub fn annotations_for(conn: &Connection, goal_id: &str) -> Result<Vec<Annotation>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, goal_id, body, created_at FROM annotations WHERE goal_id = ?1 ORDER BY created_at ASC, rowid ASC",
+    )?;
+    let anns = stmt
+        .query_map([goal_id], |row| {
+            Ok(Annotation {
+                id: row.get(0)?,
+                goal_id: row.get(1)?,
+                body: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(anns)
+}
+
+pub fn resolve_annotation_id(conn: &Connection, prefix: &str) -> Result<String> {
+    let pattern = format!("{}%", prefix);
+    let mut stmt = conn.prepare("SELECT id FROM annotations WHERE id LIKE ?1")?;
+    let ids: Vec<String> = stmt
+        .query_map([&pattern], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    match ids.len() {
+        0 => bail!("no annotation matching '{}'", prefix),
+        1 => Ok(ids.into_iter().next().unwrap()),
+        _ => bail!("ambiguous annotation prefix '{}' matches {} annotations", prefix, ids.len()),
+    }
 }

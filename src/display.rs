@@ -1,4 +1,4 @@
-use crate::db::{parse_depth, Event, Goal, GoalKind};
+use crate::db::{parse_depth, Annotation, Event, Goal, GoalKind};
 use std::collections::HashMap;
 
 pub fn print_tree(goals: &[Goal]) {
@@ -12,7 +12,7 @@ pub fn print_tree(goals: &[Goal]) {
     print_node(&by_parent, None, 0);
 }
 
-pub fn print_info(subtree: &[Goal]) {
+pub fn print_info(subtree: &[Goal], annotations: &[Annotation]) {
     let root = &subtree[0];
     let kind_str = match root.kind {
         GoalKind::Achievable => "achievable",
@@ -28,6 +28,13 @@ pub fn print_info(subtree: &[Goal]) {
     println!("depth:  {}", parse_depth(&root.id));
     println!("parent: {}", root.parent_id.as_deref().unwrap_or("none"));
     println!("body:   {}", root.body);
+    if !annotations.is_empty() {
+        println!();
+        println!("annotations:");
+        for ann in annotations {
+            println!("  {}  {}  {}", ann.id, ann.created_at, ann.body);
+        }
+    }
     if subtree.len() > 1 {
         println!();
         println!("subtree:");

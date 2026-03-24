@@ -58,14 +58,39 @@ fn main() -> Result<()> {
             let final_id = db::modify_goal(&conn, &full_id, body.as_deref(), new_parent, new_kind)?;
             println!("{}", final_id);
         }
-        Command::Delete { id } => {
+        Command::Delete { id, yes } => {
             let full_id = db::resolve_id(&conn, &id)?;
+            if !yes {
+                let goal = db::get_goal(&conn, &full_id)?;
+                eprint!("Delete '{}'? [y/N] ", goal.body);
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    return Ok(());
+                }
+            }
             db::remove_goal(&conn, &full_id)?;
+        }
+        Command::Annotate { id, text, edit, delete } => {
+            let full_id = db::resolve_id(&conn, &id)?;
+            if let Some(ann_id) = delete {
+                let full_ann_id = db::resolve_annotation_id(&conn, &ann_id)?;
+                db::delete_annotation(&conn, &full_ann_id)?;
+            } else if let Some(ann_id) = edit {
+                let full_ann_id = db::resolve_annotation_id(&conn, &ann_id)?;
+                let body = text.ok_or_else(|| anyhow::anyhow!("annotate --edit requires a text argument"))?;
+                db::edit_annotation(&conn, &full_ann_id, &body)?;
+            } else {
+                let body = text.ok_or_else(|| anyhow::anyhow!("annotate requires a text argument"))?;
+                let ann_id = db::add_annotation(&conn, &full_id, &body)?;
+                println!("{}", ann_id);
+            }
         }
         Command::Info { id } => {
             let full_id = db::resolve_id(&conn, &id)?;
             let subtree = db::collect_subtree(&conn, &full_id)?;
-            display::print_info(&subtree);
+            let annotations = db::annotations_for(&conn, &full_id)?;
+            display::print_info(&subtree, &annotations);
         }
         Command::Undo => {
             db::undo_last(&conn)?;

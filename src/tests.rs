@@ -17,6 +17,21 @@ fn goal(data_dir: &Path, args: &[&str]) -> std::process::Output {
         .expect("failed to run goal binary")
 }
 
+fn goal_stdin(data_dir: &Path, args: &[&str], input: &str) -> std::process::Output {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(goal_bin())
+        .env("GOAL_DATA_DIR", data_dir)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn goal binary");
+    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    child.wait_with_output().expect("failed to wait on goal binary")
+}
+
 fn stdout(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -114,7 +129,7 @@ fn rm_cascades_to_subgoals() {
     let parent = stdout(&goal(dir.path(), &["add", "parent"])).trim().to_string();
     goal(dir.path(), &["add", "child", "--parent", &parent]);
 
-    let rm = goal(dir.path(), &["delete", &parent]);
+    let rm = goal(dir.path(), &["delete", "--yes", &parent]);
     assert!(rm.status.success(), "{}", stderr(&rm));
 
     let list = goal(dir.path(), &["list"]);
@@ -319,7 +334,7 @@ fn undo_undone() {
 fn undo_delete_single() {
     let dir = TempDir::new().unwrap();
     let id = stdout(&goal(dir.path(), &["add", "my task"])).trim().to_string();
-    goal(dir.path(), &["delete", &id]);
+    goal(dir.path(), &["delete", "--yes", &id]);
     let out = goal(dir.path(), &["undo"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let list = stdout(&goal(dir.path(), &["list"]));
@@ -331,7 +346,7 @@ fn undo_delete_subtree() {
     let dir = TempDir::new().unwrap();
     let pid = stdout(&goal(dir.path(), &["add", "parent"])).trim().to_string();
     goal(dir.path(), &["add", "child", "--parent", &pid]);
-    goal(dir.path(), &["delete", &pid]);
+    goal(dir.path(), &["delete", "--yes", &pid]);
     let out = goal(dir.path(), &["undo"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let list = stdout(&goal(dir.path(), &["list"]));
@@ -455,6 +470,36 @@ fn nonexistent_id_errors() {
 }
 
 #[test]
+fn delete_yes_flag_skips_prompt() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "to delete"])).trim().to_string();
+    let out = goal(dir.path(), &["delete", "--yes", &id]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(!list.contains("to delete"));
+}
+
+#[test]
+fn delete_prompt_confirmed_deletes() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "to delete"])).trim().to_string();
+    let out = goal_stdin(dir.path(), &["delete", &id], "y\n");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(!list.contains("to delete"));
+}
+
+#[test]
+fn delete_prompt_declined_keeps_goal() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "keep me"])).trim().to_string();
+    let out = goal_stdin(dir.path(), &["delete", &id], "n\n");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(list.contains("keep me"));
+}
+
+#[test]
 fn no_args_shows_list() {
     let dir = TempDir::new().unwrap();
     let id = stdout(&goal(dir.path(), &["add", "default list goal"])).trim().to_string();
@@ -464,4 +509,81 @@ fn no_args_shows_list() {
     let s = stdout(&out);
     assert!(s.contains(&id));
     assert!(s.contains("default list goal"));
+}
+
+#[test]
+fn annotate_add_shows_in_info() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "learn rust"])).trim().to_string();
+    let out = goal(dir.path(), &["annotate", &id, "this is a note"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let ann_id = stdout(&out).trim().to_string();
+    assert!(ann_id.starts_with('n'), "annotation id should start with 'n', got: {}", ann_id);
+
+    let info = stdout(&goal(dir.path(), &["info", &id]));
+    assert!(info.contains("annotations:"));
+    assert!(info.contains("this is a note"));
+    assert!(info.contains(&ann_id));
+}
+
+#[test]
+fn annotate_multiple() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "goal"])).trim().to_string();
+    goal(dir.path(), &["annotate", &id, "first note"]);
+    goal(dir.path(), &["annotate", &id, "second note"]);
+
+    let info = stdout(&goal(dir.path(), &["info", &id]));
+    assert!(info.contains("first note"));
+    assert!(info.contains("second note"));
+}
+
+#[test]
+fn annotate_edit() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "goal"])).trim().to_string();
+    let ann_id = stdout(&goal(dir.path(), &["annotate", &id, "original"])).trim().to_string();
+
+    let out = goal(dir.path(), &["annotate", &id, "--edit", &ann_id, "updated"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let info = stdout(&goal(dir.path(), &["info", &id]));
+    assert!(info.contains("updated"));
+    assert!(!info.contains("original"));
+}
+
+#[test]
+fn annotate_delete() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "goal"])).trim().to_string();
+    let ann_id = stdout(&goal(dir.path(), &["annotate", &id, "to be deleted"])).trim().to_string();
+
+    let out = goal(dir.path(), &["annotate", &id, "--delete", &ann_id]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let info = stdout(&goal(dir.path(), &["info", &id]));
+    assert!(!info.contains("to be deleted"));
+    assert!(!info.contains("annotations:"));
+}
+
+#[test]
+fn annotate_cascade_on_goal_delete() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "goal"])).trim().to_string();
+    goal(dir.path(), &["annotate", &id, "some note"]);
+    goal(dir.path(), &["delete", "--yes", &id]);
+
+    let out = goal(dir.path(), &["info", &id]);
+    assert!(!out.status.success());
+}
+
+#[test]
+fn annotate_short_prefix() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "goal"])).trim().to_string();
+    let ann_id = stdout(&goal(dir.path(), &["annotate", &id, "note"])).trim().to_string();
+    let prefix = &ann_id[..4];
+
+    let out = goal(dir.path(), &["annotate", &id, "--delete", prefix]);
+    assert!(out.status.success(), "{}", stderr(&out));
 }

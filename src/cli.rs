@@ -38,9 +38,19 @@ pub enum Command {
     },
     Delete {
         id: String,
+        #[arg(long, short)]
+        yes: bool,
     },
     Info {
         id: String,
+    },
+    Annotate {
+        id: String,
+        text: Option<String>,
+        #[arg(long, conflicts_with = "delete")]
+        edit: Option<String>,
+        #[arg(long, conflicts_with = "edit")]
+        delete: Option<String>,
     },
     Undo,
     Log,
