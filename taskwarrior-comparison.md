@@ -8,7 +8,18 @@
 | With metadata | `task add "desc" due:Friday priority:H project:Work +tag` | `goal add "desc" --continuous` |
 | Parent/hierarchy | `task 2 modify depends:1` (after the fact) | `goal add "desc" --parent <id>` (at creation) |
 
-Taskwarrior attaches hierarchy via `depends` as a modification; `goal` sets parent at creation time.
+Taskwarrior attaches hierarchy via `depends` as a modification; `goal` sets parent at creation time. Both support reparenting after creation via `modify`.
+
+## Modify
+
+| | Taskwarrior | `goal` |
+|---|---|---|
+| Edit description | `task 1 modify "new desc"` | `goal modify <id> --body "new desc"` |
+| Reparent | `task 2 modify depends:1` | `goal modify <id> --parent <id>` |
+| Detach from parent | `task 2 modify depends:` (clear) | `goal modify <id> --no-parent` |
+| Change kind | — | `goal modify <id> --continuous` / `--achievable` |
+
+Reparenting in `goal` regenerates the ID (and all descendant IDs) to keep the depth encoding correct. Taskwarrior IDs are stable across reparenting.
 
 ## Done / Complete
 
@@ -36,7 +47,6 @@ Taskwarrior's `undo` is a global last-action undo. `goal undone` directly target
 
 ## Notable gaps in `goal`
 
-- No `modify` — can't edit body or reparent after creation
 - No filtering/querying
 - No way to view a single goal's detail or subtree
 - No `undo`
