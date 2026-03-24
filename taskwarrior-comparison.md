@@ -43,7 +43,7 @@ Taskwarrior's `undo` is a global last-action undo. `goal undone` directly target
 | | Taskwarrior | `goal` |
 |---|---|---|
 | Default list | `task list` / `task next` | `goal list` (also: `goal` with no args) |
-| Filtered | `task +tag project:X list` | — |
+| Filter by tag | `task +tag list` | `goal list +tag` (multiple tags: `goal list +tag1 +tag2`) |
 | Single item + subtree | `task 1 info` | `goal info <id>` |
 
 ## Annotations
@@ -79,10 +79,19 @@ Annotation IDs in `goal` are short random strings (prefix-resolvable like goal I
 
 Both tools use the same `+tag` / `-tag` syntax. Multiple tags can be specified in a single command. Tags cascade-delete with their goal.
 
+## Priority / Ranking
+
+| | Taskwarrior | `goal` |
+|---|---|---|
+| Set priority | `task 1 modify priority:H` (H/M/L levels) | `goal rank <higher-id> <lower-id>` (pairwise ordering) |
+| Remove priority | `task 1 modify priority:` (clear) | `goal unrank <higher-id> <lower-id>` |
+| View priority order | shown in `task next` (sorted by urgency) | rank number shown in `goal list` |
+
+Taskwarrior uses a fixed priority scale (H/M/L) combined with urgency coefficients. `goal` uses explicit pairwise priority edges — a partial order — and computes a topological rank shown in the list. Multiple edges can be added to express ordering between any two goals.
+
 ## Notable gaps in `goal`
 
-- No filtering/querying (Taskwarrior: `task +tag project:X list`)
-
-- No priorities or due dates
+- No project/attribute querying (Taskwarrior: `task project:X list`)
+- No due dates
 - No sync / export
 - No shell completions

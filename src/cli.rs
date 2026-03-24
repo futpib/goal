@@ -24,7 +24,10 @@ pub enum Command {
     Undone {
         id: String,
     },
-    List,
+    List {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        tags: Vec<String>,
+    },
     Modify {
         id: String,
         #[arg(long)]

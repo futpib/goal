@@ -1030,3 +1030,27 @@ fn prioritize_then_done() {
     assert!(!list.contains("goal A"), "done A should be excluded");
     assert!(list.contains("goal B"), "B should still appear");
 }
+
+#[test]
+fn list_tag_filter_shows_only_matching() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "goal A", "+work"])).trim().to_string();
+    let _b = stdout(&goal(dir.path(), &["add", "goal B", "+personal"])).trim().to_string();
+    assert!(!a.is_empty());
+
+    let list = stdout(&goal(dir.path(), &["list", "+work"]));
+    assert!(list.contains("goal A"), "tagged goal should appear");
+    assert!(!list.contains("goal B"), "untagged goal should not appear");
+}
+
+#[test]
+fn list_tag_filter_includes_ancestors() {
+    let dir = TempDir::new().unwrap();
+    let parent = stdout(&goal(dir.path(), &["add", "parent goal"])).trim().to_string();
+    let child = stdout(&goal(dir.path(), &["add", "child goal", &format!("--parent={}", parent), "+work"])).trim().to_string();
+    assert!(!child.is_empty());
+
+    let list = stdout(&goal(dir.path(), &["list", "+work"]));
+    assert!(list.contains("child goal"), "tagged child should appear");
+    assert!(list.contains("parent goal"), "ancestor of tagged child should appear");
+}

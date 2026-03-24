@@ -11,7 +11,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let conn = db::open_db()?;
 
-    match args.command.unwrap_or(Command::List) {
+    match args.command.unwrap_or(Command::List { tags: vec![] }) {
         Command::Add { description, parent, continuous, tags } => {
             let kind = if continuous {
                 db::GoalKind::Continuous
@@ -40,17 +40,47 @@ fn main() -> Result<()> {
             let full_id = db::resolve_id(&conn, &id)?;
             db::set_achieved(&conn, &full_id, false)?;
         }
-        Command::List => {
+        Command::List { tags: tag_args } => {
             let goals = db::all_goals(&conn)?;
             let pending: Vec<_> = goals.into_iter().filter(|g| !g.achieved).collect();
             let tags = db::all_goal_tags(&conn)?;
+            let filter_tags: Vec<&str> = tag_args.iter()
+                .filter_map(|t| t.strip_prefix('+'))
+                .collect();
+            let visible: Vec<_> = if filter_tags.is_empty() {
+                pending.iter().collect()
+            } else {
+                let matching: std::collections::HashSet<&str> = pending.iter()
+                    .filter(|g| {
+                        let goal_tags = tags.get(&g.id).map(Vec::as_slice).unwrap_or(&[]);
+                        filter_tags.iter().all(|ft| goal_tags.iter().any(|gt| gt == ft))
+                    })
+                    .map(|g| g.id.as_str())
+                    .collect();
+                let ancestor_ids: std::collections::HashSet<String> = pending.iter()
+                    .filter(|g| matching.contains(g.id.as_str()))
+                    .flat_map(|g| {
+                        let mut ids = Vec::new();
+                        let mut cur = g.parent_id.clone();
+                        while let Some(pid) = cur {
+                            ids.push(pid.clone());
+                            cur = pending.iter().find(|p| p.id == pid).and_then(|p| p.parent_id.clone());
+                        }
+                        ids
+                    })
+                    .collect();
+                pending.iter()
+                    .filter(|g| matching.contains(g.id.as_str()) || ancestor_ids.contains(&g.id))
+                    .collect()
+            };
+            let visible_owned: Vec<db::Goal> = visible.into_iter().cloned().collect();
             let edges = db::all_priority_edges(&conn)?;
             let rowids = db::goal_rowids(&conn)?;
-            let ordered_ids = db::compute_priority_order(&pending, &edges, &rowids);
+            let ordered_ids = db::compute_priority_order(&visible_owned, &edges, &rowids);
             let ranks: HashMap<String, usize> = ordered_ids.iter().enumerate()
                 .map(|(i, id)| (id.clone(), i + 1))
                 .collect();
-            display::print_tree(&pending, &tags, &ranks);
+            display::print_tree(&visible_owned, &tags, &ranks);
         }
         Command::Modify { id, body, parent, no_parent, continuous, achievable, tags } => {
             if body.is_none() && parent.is_none() && !no_parent && !continuous && !achievable && tags.is_empty() {
