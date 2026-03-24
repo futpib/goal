@@ -114,7 +114,7 @@ fn rm_cascades_to_subgoals() {
     let parent = stdout(&goal(dir.path(), &["add", "parent"])).trim().to_string();
     goal(dir.path(), &["add", "child", "--parent", &parent]);
 
-    let rm = goal(dir.path(), &["rm", &parent]);
+    let rm = goal(dir.path(), &["delete", &parent]);
     assert!(rm.status.success(), "{}", stderr(&rm));
 
     let list = goal(dir.path(), &["list"]);
@@ -153,6 +153,6 @@ fn nonexistent_id_errors() {
     let done = goal(dir.path(), &["done", "a0nonexistent"]);
     assert!(!done.status.success());
 
-    let rm = goal(dir.path(), &["rm", "a0nonexistent"]);
+    let rm = goal(dir.path(), &["delete", "a0nonexistent"]);
     assert!(!rm.status.success());
 }

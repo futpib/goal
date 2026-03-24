@@ -23,7 +23,7 @@ pub enum Command {
         id: String,
     },
     List,
-    Rm {
+    Delete {
         id: String,
     },
 }

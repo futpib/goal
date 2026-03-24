@@ -38,7 +38,7 @@ fn main() -> Result<()> {
             let goals = db::all_goals(&conn)?;
             display::print_tree(&goals);
         }
-        Command::Rm { id } => {
+        Command::Delete { id } => {
             let full_id = db::resolve_id(&conn, &id)?;
             db::remove_goal(&conn, &full_id)?;
         }
