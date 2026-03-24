@@ -69,4 +69,6 @@ pub enum Command {
         higher: String,
         lower: String,
     },
+    #[command(name = "rank-interactive")]
+    RankInteractive,
 }

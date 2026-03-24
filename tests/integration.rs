@@ -1054,3 +1054,82 @@ fn list_tag_filter_includes_ancestors() {
     assert!(list.contains("child goal"), "tagged child should appear");
     assert!(list.contains("parent goal"), "ancestor of tagged child should appear");
 }
+
+#[test]
+fn rank_interactive_records_edge() {
+    let dir = TempDir::new().unwrap();
+    let _a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    let _b = stdout(&goal(dir.path(), &["add", "goal B"])).trim().to_string();
+
+    // Choose "1" — whichever goal is presented first gets higher priority
+    let out = goal_stdin(dir.path(), &["rank-interactive"], "1\n");
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // After ranking, rank-interactive should report no more pairs
+    let out2 = goal_stdin(dir.path(), &["rank-interactive"], "");
+    assert!(out2.status.success(), "{}", stderr(&out2));
+    let s = stdout(&out2);
+    assert!(s.contains("already ordered"), "should report all ordered after ranking, got: {}", s);
+}
+
+#[test]
+fn rank_interactive_skip() {
+    let dir = TempDir::new().unwrap();
+    let _a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    let _b = stdout(&goal(dir.path(), &["add", "goal B"])).trim().to_string();
+
+    let out = goal_stdin(dir.path(), &["rank-interactive"], "s\n");
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // No edge added; both should still appear
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(list.contains("goal A"));
+    assert!(list.contains("goal B"));
+}
+
+#[test]
+fn rank_interactive_quit() {
+    let dir = TempDir::new().unwrap();
+    let _a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    let _b = stdout(&goal(dir.path(), &["add", "goal B"])).trim().to_string();
+    let _c = stdout(&goal(dir.path(), &["add", "goal C"])).trim().to_string();
+
+    // q on first pair — no edges added
+    let out = goal_stdin(dir.path(), &["rank-interactive"], "q\n");
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(list.contains("goal A"));
+    assert!(list.contains("goal B"));
+    assert!(list.contains("goal C"));
+}
+
+#[test]
+fn rank_interactive_skips_transitively_ranked() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "goal B"])).trim().to_string();
+    let c = stdout(&goal(dir.path(), &["add", "goal C"])).trim().to_string();
+    // A > B > C; A > C is implied
+    goal(dir.path(), &["rank", &a, &b]);
+    goal(dir.path(), &["rank", &b, &c]);
+
+    // Only pair not yet ordered is none — all are transitively covered
+    let out = goal_stdin(dir.path(), &["rank-interactive"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let s = stdout(&out);
+    assert!(s.contains("already ordered"), "A>B>C covers all pairs, got: {}", s);
+}
+
+#[test]
+fn rank_interactive_no_pairs_when_all_ranked() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "goal B"])).trim().to_string();
+    goal(dir.path(), &["rank", &a, &b]);
+
+    let out = goal_stdin(dir.path(), &["rank-interactive"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let s = stdout(&out);
+    assert!(s.contains("already ordered"), "should say all ordered, got: {}", s);
+}

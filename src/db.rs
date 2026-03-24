@@ -849,6 +849,59 @@ pub fn list_events(conn: &Connection) -> Result<Vec<Event>> {
     Ok(result)
 }
 
+/// Returns pairs of pending goal IDs where no ordering (direct or transitive) exists yet.
+/// Each pair (a, b) appears only once (a < b lexicographically).
+pub fn unranked_pairs(conn: &Connection) -> Result<Vec<(Goal, Goal)>> {
+    let goals = all_goals(conn)?;
+    let pending: Vec<&Goal> = goals.iter().filter(|g| !g.achieved).collect();
+    let edges = all_priority_edges(conn)?;
+
+    // Build transitive reachability: reachable[a] = set of goals reachable from a (a > them)
+    use std::collections::{HashMap, HashSet};
+    let mut reachable: HashMap<&str, HashSet<&str>> = HashMap::new();
+    let pending_ids: HashSet<&str> = pending.iter().map(|g| g.id.as_str()).collect();
+
+    for g in &pending {
+        reachable.insert(g.id.as_str(), HashSet::new());
+    }
+    for (h, l) in &edges {
+        if pending_ids.contains(h.as_str()) && pending_ids.contains(l.as_str()) {
+            reachable.entry(h.as_str()).or_default().insert(l.as_str());
+        }
+    }
+    // Expand transitively (Floyd-Warshall style)
+    let ids: Vec<&str> = pending.iter().map(|g| g.id.as_str()).collect();
+    loop {
+        let mut changed = false;
+        for &a in &ids {
+            let via: Vec<&str> = reachable[a].iter().copied().collect();
+            for b in via {
+                let new_reach: Vec<&str> = reachable.get(b).map(|s| s.iter().copied().collect()).unwrap_or_default();
+                for c in new_reach {
+                    if reachable.entry(a).or_default().insert(c) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed { break; }
+    }
+
+    let mut pairs = Vec::new();
+    for i in 0..pending.len() {
+        for j in (i + 1)..pending.len() {
+            let a = pending[i];
+            let b = pending[j];
+            let a_reaches_b = reachable.get(a.id.as_str()).map_or(false, |s| s.contains(b.id.as_str()));
+            let b_reaches_a = reachable.get(b.id.as_str()).map_or(false, |s| s.contains(a.id.as_str()));
+            if !a_reaches_b && !b_reaches_a {
+                pairs.push((a.clone(), b.clone()));
+            }
+        }
+    }
+    Ok(pairs)
+}
+
 pub fn all_goals(conn: &Connection) -> Result<Vec<Goal>> {
     let mut stmt = conn.prepare(
         "SELECT id, parent_id, body, achieved FROM goals ORDER BY id",
@@ -927,15 +980,6 @@ pub fn remove_tag(conn: &Connection, goal_id: &str, tag: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn tags_for(conn: &Connection, goal_id: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT tag FROM goal_tags WHERE goal_id = ?1 ORDER BY tag ASC",
-    )?;
-    let tags = stmt
-        .query_map([goal_id], |row| row.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok(tags)
-}
 
 pub fn all_goal_tags(conn: &Connection) -> Result<std::collections::HashMap<String, Vec<String>>> {
     let mut stmt = conn.prepare("SELECT goal_id, tag FROM goal_tags ORDER BY goal_id, tag")?;

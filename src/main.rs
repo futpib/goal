@@ -165,6 +165,30 @@ fn main() -> Result<()> {
             let l = db::resolve_id(&conn, &lower)?;
             db::remove_priority_edge(&conn, &h, &l)?;
         }
+        Command::RankInteractive => {
+            let pairs = db::unranked_pairs(&conn)?;
+            if pairs.is_empty() {
+                println!("All goals are already ordered.");
+                return Ok(());
+            }
+            eprintln!("Rank goals interactively. For each pair enter:");
+            eprintln!("  1  — first goal has higher priority");
+            eprintln!("  2  — second goal has higher priority");
+            eprintln!("  s  — skip (no relation)");
+            eprintln!("  q  — quit");
+            eprintln!();
+            for (a, b) in &pairs {
+                eprint!("1: {}  {}\n2: {}  {}\n> ", a.id, a.body, b.id, b.body);
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                match input.trim() {
+                    "1" => { db::add_priority_edge(&conn, &a.id, &b.id)?; }
+                    "2" => { db::add_priority_edge(&conn, &b.id, &a.id)?; }
+                    "q" => break,
+                    _ => {}
+                }
+            }
+        }
     }
 
     Ok(())
