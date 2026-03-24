@@ -23,6 +23,19 @@ pub enum Command {
         id: String,
     },
     List,
+    Modify {
+        id: String,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long, conflicts_with = "no_parent")]
+        parent: Option<String>,
+        #[arg(long = "no-parent", conflicts_with = "parent")]
+        no_parent: bool,
+        #[arg(long, short, conflicts_with = "achievable")]
+        continuous: bool,
+        #[arg(long, conflicts_with = "continuous")]
+        achievable: bool,
+    },
     Delete {
         id: String,
     },

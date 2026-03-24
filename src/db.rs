@@ -148,6 +148,141 @@ pub fn remove_goal(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+pub enum ModifyParent {
+    Keep,
+    Detach,
+    Reparent(String),
+}
+
+fn children_of(conn: &Connection, parent_id: &str) -> Result<Vec<Goal>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, parent_id, body, achieved FROM goals WHERE parent_id = ?1 ORDER BY id",
+    )?;
+    let goals = stmt
+        .query_map([parent_id], |row| {
+            let id: String = row.get(0)?;
+            let kind = kind_from_id(&id);
+            Ok(Goal {
+                id,
+                parent_id: row.get(1)?,
+                body: row.get(2)?,
+                achieved: row.get::<_, i32>(3)? != 0,
+                kind,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(goals)
+}
+
+fn collect_subtree(conn: &Connection, root_id: &str) -> Result<Vec<Goal>> {
+    let root = {
+        let mut stmt = conn.prepare(
+            "SELECT id, parent_id, body, achieved FROM goals WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map([root_id], |row| {
+            let id: String = row.get(0)?;
+            let kind = kind_from_id(&id);
+            Ok(Goal {
+                id,
+                parent_id: row.get(1)?,
+                body: row.get(2)?,
+                achieved: row.get::<_, i32>(3)? != 0,
+                kind,
+            })
+        })?;
+        rows.next().ok_or_else(|| anyhow::anyhow!("no goal with id '{}'", root_id))??
+    };
+    let mut result = vec![root];
+    let mut i = 0;
+    while i < result.len() {
+        let id = result[i].id.clone();
+        let kids = children_of(conn, &id)?;
+        result.extend(kids);
+        i += 1;
+    }
+    Ok(result)
+}
+
+pub fn modify_goal(
+    conn: &Connection,
+    id: &str,
+    new_body: Option<&str>,
+    new_parent: ModifyParent,
+    new_kind_opt: Option<GoalKind>,
+) -> Result<String> {
+    let subtree = collect_subtree(conn, id)?;
+    let root = &subtree[0];
+
+    let new_kind = new_kind_opt.unwrap_or_else(|| root.kind.clone());
+    let new_parent_id: Option<String> = match &new_parent {
+        ModifyParent::Keep => root.parent_id.clone(),
+        ModifyParent::Detach => None,
+        ModifyParent::Reparent(pid) => {
+            if subtree.iter().any(|g| &g.id == pid) {
+                bail!("cannot reparent a goal under one of its own descendants");
+            }
+            Some(pid.clone())
+        }
+    };
+
+    let old_depth = parse_depth(id) as i32;
+    let new_depth = match &new_parent_id {
+        Some(pid) => parse_depth(pid) as i32 + 1,
+        None => 0,
+    };
+    let depth_delta = new_depth - old_depth;
+    let id_changes = new_kind != root.kind || depth_delta != 0;
+    let new_body_str = new_body.unwrap_or(&root.body);
+
+    if !id_changes {
+        conn.execute(
+            "UPDATE goals SET body = ?1 WHERE id = ?2",
+            rusqlite::params![new_body_str, id],
+        )?;
+        return Ok(id.to_string());
+    }
+
+    // Build old->new ID mapping for full subtree
+    let mut id_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for node in &subtree {
+        let node_kind = if node.id == id { new_kind.clone() } else { node.kind.clone() };
+        let node_old_depth = parse_depth(&node.id) as i32;
+        let node_new_depth = (node_old_depth + depth_delta) as u32;
+        id_map.insert(node.id.clone(), generate_id(&node_kind, node_new_depth));
+    }
+
+    let new_root_id = id_map[id].clone();
+
+    conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    let tx_result = (|| -> Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        // Delete old rows (FK off, order doesn't matter)
+        for node in &subtree {
+            tx.execute("DELETE FROM goals WHERE id = ?1", [&node.id])?;
+        }
+        // Insert new rows
+        for node in &subtree {
+            let new_id = &id_map[&node.id];
+            let new_node_parent_id: Option<String> = if node.id == id {
+                new_parent_id.clone()
+            } else {
+                node.parent_id.as_ref().map(|pid| id_map[pid].clone())
+            };
+            let node_body = if node.id == id { new_body_str } else { &node.body };
+            tx.execute(
+                "INSERT INTO goals (id, parent_id, body, achieved) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![new_id, new_node_parent_id, node_body, node.achieved as i32],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })();
+    conn.execute_batch("PRAGMA foreign_keys = ON")?;
+    tx_result?;
+
+    Ok(new_root_id)
+}
+
 pub fn all_goals(conn: &Connection) -> Result<Vec<Goal>> {
     let mut stmt = conn.prepare(
         "SELECT id, parent_id, body, achieved FROM goals ORDER BY id",
