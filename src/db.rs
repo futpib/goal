@@ -2,16 +2,17 @@ use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
 use rand::RngExt;
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GoalKind {
     Achievable,
     Continuous,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Goal {
     pub id: String,
     pub parent_id: Option<String>,
@@ -20,11 +21,21 @@ pub struct Goal {
     pub kind: GoalKind,
 }
 
+pub struct Event {
+    pub event_id: String,
+    pub timestamp: String,
+    pub op: String,
+    pub goal_id: String,
+    pub goal_body: String,
+}
+
+pub enum ModifyParent {
+    Keep,
+    Detach,
+    Reparent(String),
+}
+
 /// Encode depth as variable-length base-15 with 'f' as continuation.
-/// depth 0–14 → single digit '0'–'e'
-/// depth 15–29 → 'f' + '0'–'e'
-/// depth 30–44 → 'ff' + '0'–'e'
-/// etc.
 fn encode_depth(mut depth: u32) -> String {
     let mut out = String::new();
     loop {
@@ -66,11 +77,30 @@ pub fn generate_id(kind: &GoalKind, depth: u32) -> String {
     format!("{}{}", prefix, &random_hex[..random_len])
 }
 
+pub fn generate_event_id() -> String {
+    let mut bytes = [0u8; 8];
+    rand::rng().fill(&mut bytes);
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    format!("e{}", &hex[..15])
+}
+
 fn kind_from_id(id: &str) -> GoalKind {
     match id.chars().next() {
         Some('a') => GoalKind::Achievable,
         _ => GoalKind::Continuous,
     }
+}
+
+fn row_to_goal(row: &rusqlite::Row) -> rusqlite::Result<Goal> {
+    let id: String = row.get(0)?;
+    let kind = kind_from_id(&id);
+    Ok(Goal {
+        id,
+        parent_id: row.get(1)?,
+        body: row.get(2)?,
+        achieved: row.get::<_, i32>(3)? != 0,
+        kind,
+    })
 }
 
 pub fn open_db() -> Result<Connection> {
@@ -93,6 +123,20 @@ pub fn open_db() -> Result<Connection> {
             parent_id TEXT REFERENCES goals(id) ON DELETE CASCADE,
             body      TEXT NOT NULL,
             achieved  INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS events (
+            event_id   TEXT PRIMARY KEY,
+            timestamp  TEXT NOT NULL,
+            op         TEXT NOT NULL,
+            snapshot   TEXT NOT NULL,
+            new_id     TEXT
+        );
+        CREATE TABLE IF NOT EXISTS events_undone (
+            event_id   TEXT PRIMARY KEY,
+            timestamp  TEXT NOT NULL,
+            op         TEXT NOT NULL,
+            snapshot   TEXT NOT NULL,
+            new_id     TEXT
         );",
     )?;
     Ok(conn)
@@ -111,65 +155,12 @@ pub fn resolve_id(conn: &Connection, prefix: &str) -> Result<String> {
     }
 }
 
-pub fn add_goal(conn: &Connection, body: &str, parent_id: Option<&str>, kind: &GoalKind) -> Result<String> {
-    let depth = if let Some(pid) = parent_id {
-        parse_depth(pid) + 1
-    } else {
-        0
-    };
-    let id = generate_id(kind, depth);
-    conn.execute(
-        "INSERT INTO goals (id, parent_id, body) VALUES (?1, ?2, ?3)",
-        rusqlite::params![id, parent_id, body],
-    )?;
-    Ok(id)
-}
-
-pub fn set_achieved(conn: &Connection, id: &str, achieved: bool) -> Result<()> {
-    let kind = kind_from_id(id);
-    if kind == GoalKind::Continuous {
-        bail!("goal '{}' is continuous and cannot be marked done", id);
-    }
-    let changed = conn.execute(
-        "UPDATE goals SET achieved = ?1 WHERE id = ?2",
-        rusqlite::params![achieved as i32, id],
-    )?;
-    if changed == 0 {
-        bail!("no goal with id '{}'", id);
-    }
-    Ok(())
-}
-
-pub fn remove_goal(conn: &Connection, id: &str) -> Result<()> {
-    let changed = conn.execute("DELETE FROM goals WHERE id = ?1", [id])?;
-    if changed == 0 {
-        bail!("no goal with id '{}'", id);
-    }
-    Ok(())
-}
-
-pub enum ModifyParent {
-    Keep,
-    Detach,
-    Reparent(String),
-}
-
 fn children_of(conn: &Connection, parent_id: &str) -> Result<Vec<Goal>> {
     let mut stmt = conn.prepare(
         "SELECT id, parent_id, body, achieved FROM goals WHERE parent_id = ?1 ORDER BY id",
     )?;
     let goals = stmt
-        .query_map([parent_id], |row| {
-            let id: String = row.get(0)?;
-            let kind = kind_from_id(&id);
-            Ok(Goal {
-                id,
-                parent_id: row.get(1)?,
-                body: row.get(2)?,
-                achieved: row.get::<_, i32>(3)? != 0,
-                kind,
-            })
-        })?
+        .query_map([parent_id], row_to_goal)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(goals)
 }
@@ -179,18 +170,9 @@ fn collect_subtree(conn: &Connection, root_id: &str) -> Result<Vec<Goal>> {
         let mut stmt = conn.prepare(
             "SELECT id, parent_id, body, achieved FROM goals WHERE id = ?1",
         )?;
-        let mut rows = stmt.query_map([root_id], |row| {
-            let id: String = row.get(0)?;
-            let kind = kind_from_id(&id);
-            Ok(Goal {
-                id,
-                parent_id: row.get(1)?,
-                body: row.get(2)?,
-                achieved: row.get::<_, i32>(3)? != 0,
-                kind,
-            })
-        })?;
-        rows.next().ok_or_else(|| anyhow::anyhow!("no goal with id '{}'", root_id))??
+        let mut rows = stmt.query_map([root_id], row_to_goal)?;
+        rows.next()
+            .ok_or_else(|| anyhow::anyhow!("no goal with id '{}'", root_id))??
     };
     let mut result = vec![root];
     let mut i = 0;
@@ -201,6 +183,91 @@ fn collect_subtree(conn: &Connection, root_id: &str) -> Result<Vec<Goal>> {
         i += 1;
     }
     Ok(result)
+}
+
+fn record_event(
+    conn: &Connection,
+    op: &str,
+    snapshot: &[Goal],
+    new_id: Option<&str>,
+) -> Result<String> {
+    let event_id = generate_event_id();
+    let snapshot_json = serde_json::to_string(snapshot)?;
+    conn.execute(
+        "INSERT INTO events (event_id, timestamp, op, snapshot, new_id) \
+         VALUES (?1, datetime('now'), ?2, ?3, ?4)",
+        rusqlite::params![event_id, op, snapshot_json, new_id],
+    )?;
+    Ok(event_id)
+}
+
+pub fn add_goal(conn: &Connection, body: &str, parent_id: Option<&str>, kind: &GoalKind) -> Result<String> {
+    let depth = if let Some(pid) = parent_id {
+        parse_depth(pid) + 1
+    } else {
+        0
+    };
+    let id = generate_id(kind, depth);
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO goals (id, parent_id, body) VALUES (?1, ?2, ?3)",
+        rusqlite::params![id, parent_id, body],
+    )?;
+    let snapshot_goal = Goal {
+        id: id.clone(),
+        parent_id: parent_id.map(String::from),
+        body: body.to_string(),
+        achieved: false,
+        kind: kind.clone(),
+    };
+    let snapshot_json = serde_json::to_string(&[&snapshot_goal])?;
+    let event_id = generate_event_id();
+    tx.execute(
+        "INSERT INTO events (event_id, timestamp, op, snapshot, new_id) \
+         VALUES (?1, datetime('now'), 'Add', ?2, ?3)",
+        rusqlite::params![event_id, snapshot_json, id],
+    )?;
+    tx.commit()?;
+    Ok(id)
+}
+
+pub fn set_achieved(conn: &Connection, id: &str, achieved: bool) -> Result<()> {
+    let kind = kind_from_id(id);
+    if kind == GoalKind::Continuous {
+        bail!("goal '{}' is continuous and cannot be marked done", id);
+    }
+    let tx = conn.unchecked_transaction()?;
+    let goal = {
+        let mut stmt = tx.prepare(
+            "SELECT id, parent_id, body, achieved FROM goals WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map([id], row_to_goal)?;
+        rows.next()
+            .ok_or_else(|| anyhow::anyhow!("no goal with id '{}'", id))??
+    };
+    let changed = tx.execute(
+        "UPDATE goals SET achieved = ?1 WHERE id = ?2",
+        rusqlite::params![achieved as i32, id],
+    )?;
+    if changed == 0 {
+        bail!("no goal with id '{}'", id);
+    }
+    let op = if achieved { "Done" } else { "Undone" };
+    record_event(&tx, op, &[goal], None)?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn remove_goal(conn: &Connection, id: &str) -> Result<()> {
+    let subtree = collect_subtree(conn, id)?;
+    let tx = conn.unchecked_transaction()?;
+    let changed = tx.execute("DELETE FROM goals WHERE id = ?1", [id])?;
+    if changed == 0 {
+        bail!("no goal with id '{}'", id);
+    }
+    record_event(&tx, "Delete", &subtree, None)?;
+    tx.commit()?;
+    Ok(())
 }
 
 pub fn modify_goal(
@@ -235,14 +302,17 @@ pub fn modify_goal(
     let new_body_str = new_body.unwrap_or(&root.body);
 
     if !id_changes {
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "UPDATE goals SET body = ?1 WHERE id = ?2",
             rusqlite::params![new_body_str, id],
         )?;
+        // snapshot is pre-state (root before body change)
+        record_event(&tx, "Modify", &subtree, Some(id))?;
+        tx.commit()?;
         return Ok(id.to_string());
     }
 
-    // Build old->new ID mapping for full subtree
     let mut id_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for node in &subtree {
         let node_kind = if node.id == id { new_kind.clone() } else { node.kind.clone() };
@@ -256,11 +326,9 @@ pub fn modify_goal(
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
     let tx_result = (|| -> Result<()> {
         let tx = conn.unchecked_transaction()?;
-        // Delete old rows (FK off, order doesn't matter)
         for node in &subtree {
             tx.execute("DELETE FROM goals WHERE id = ?1", [&node.id])?;
         }
-        // Insert new rows
         for node in &subtree {
             let new_id = &id_map[&node.id];
             let new_node_parent_id: Option<String> = if node.id == id {
@@ -274,6 +342,7 @@ pub fn modify_goal(
                 rusqlite::params![new_id, new_node_parent_id, node_body, node.achieved as i32],
             )?;
         }
+        record_event(&tx, "Modify", &subtree, Some(&new_root_id))?;
         tx.commit()?;
         Ok(())
     })();
@@ -283,22 +352,120 @@ pub fn modify_goal(
     Ok(new_root_id)
 }
 
+pub fn undo_last(conn: &Connection) -> Result<()> {
+    let row = {
+        let mut stmt = conn.prepare(
+            "SELECT event_id, op, snapshot, new_id FROM events \
+             ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        match rows.next() {
+            None => bail!("nothing to undo"),
+            Some(r) => r?,
+        }
+    };
+    let (event_id, op, snapshot_json, new_id) = row;
+    let snapshot: Vec<Goal> = serde_json::from_str(&snapshot_json)?;
+
+    conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    let tx_result = (|| -> Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        match op.as_str() {
+            "Add" => {
+                let target = new_id.as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("malformed Add event: missing new_id"))?;
+                tx.execute("DELETE FROM goals WHERE id = ?1", [target])?;
+            }
+            "Done" | "Undone" => {
+                let goal = snapshot.first()
+                    .ok_or_else(|| anyhow::anyhow!("malformed event: empty snapshot"))?;
+                tx.execute(
+                    "UPDATE goals SET achieved = ?1 WHERE id = ?2",
+                    rusqlite::params![goal.achieved as i32, goal.id],
+                )?;
+            }
+            "Delete" => {
+                for g in &snapshot {
+                    tx.execute(
+                        "INSERT INTO goals (id, parent_id, body, achieved) VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![g.id, g.parent_id, g.body, g.achieved as i32],
+                    )?;
+                }
+            }
+            "Modify" => {
+                let target = new_id.as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("malformed Modify event: missing new_id"))?;
+                tx.execute("DELETE FROM goals WHERE id = ?1", [target])?;
+                for g in &snapshot {
+                    tx.execute(
+                        "INSERT INTO goals (id, parent_id, body, achieved) VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![g.id, g.parent_id, g.body, g.achieved as i32],
+                    )?;
+                }
+            }
+            _ => bail!("unknown op '{}'", op),
+        }
+        // Archive the event before deleting it
+        tx.execute(
+            "INSERT INTO events_undone SELECT * FROM events WHERE event_id = ?1",
+            [&event_id],
+        )?;
+        tx.execute("DELETE FROM events WHERE event_id = ?1", [&event_id])?;
+        tx.commit()?;
+        Ok(())
+    })();
+    conn.execute_batch("PRAGMA foreign_keys = ON")?;
+    tx_result?;
+    Ok(())
+}
+
+pub fn list_events(conn: &Connection) -> Result<Vec<Event>> {
+    let mut stmt = conn.prepare(
+        "SELECT event_id, timestamp, op, snapshot, new_id \
+         FROM events ORDER BY timestamp ASC, rowid ASC",
+    )?;
+    let events = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut result = Vec::new();
+    for (event_id, timestamp, op, snapshot_json, new_id) in events {
+        let snapshot: Vec<Goal> = serde_json::from_str(&snapshot_json)
+            .unwrap_or_default();
+        let first = snapshot.first();
+        let goal_id = first
+            .map(|g| g.id.clone())
+            .or(new_id)
+            .unwrap_or_default();
+        let goal_body = first
+            .map(|g| g.body.clone())
+            .unwrap_or_default();
+        result.push(Event { event_id, timestamp, op, goal_id, goal_body });
+    }
+    Ok(result)
+}
+
 pub fn all_goals(conn: &Connection) -> Result<Vec<Goal>> {
     let mut stmt = conn.prepare(
         "SELECT id, parent_id, body, achieved FROM goals ORDER BY id",
     )?;
     let goals = stmt
-        .query_map([], |row| {
-            let id: String = row.get(0)?;
-            let kind = kind_from_id(&id);
-            Ok(Goal {
-                id,
-                parent_id: row.get(1)?,
-                body: row.get(2)?,
-                achieved: row.get::<_, i32>(3)? != 0,
-                kind,
-            })
-        })?
+        .query_map([], row_to_goal)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(goals)
 }

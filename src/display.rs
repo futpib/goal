@@ -1,4 +1,4 @@
-use crate::db::{Goal, GoalKind};
+use crate::db::{Event, Goal, GoalKind};
 use std::collections::HashMap;
 
 pub fn print_tree(goals: &[Goal]) {
@@ -10,6 +10,15 @@ pub fn print_tree(goals: &[Goal]) {
         bucket.sort_by(|a, b| a.id.cmp(&b.id));
     }
     print_node(&by_parent, None, 0);
+}
+
+pub fn print_log(events: &[Event]) {
+    for e in events {
+        println!(
+            "{}  {}  {:<8}  {}  \"{}\"",
+            e.event_id, e.timestamp, e.op, e.goal_id, e.goal_body
+        );
+    }
 }
 
 fn print_node(map: &HashMap<Option<String>, Vec<&Goal>>, parent_id: Option<String>, depth: usize) {

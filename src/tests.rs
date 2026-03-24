@@ -282,6 +282,132 @@ fn modify_nonexistent_id_errors() {
 }
 
 #[test]
+fn undo_add() {
+    let dir = TempDir::new().unwrap();
+    goal(dir.path(), &["add", "learn rust"]);
+    let out = goal(dir.path(), &["undo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(!list.contains("learn rust"));
+}
+
+#[test]
+fn undo_done() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "read a book"])).trim().to_string();
+    goal(dir.path(), &["done", &id]);
+    let out = goal(dir.path(), &["undo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(list.contains("[ ]"));
+    assert!(!list.contains("[x]"));
+}
+
+#[test]
+fn undo_undone() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "read a book"])).trim().to_string();
+    goal(dir.path(), &["done", &id]);
+    goal(dir.path(), &["undone", &id]);
+    let out = goal(dir.path(), &["undo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(list.contains("[x]"));
+}
+
+#[test]
+fn undo_delete_single() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "my task"])).trim().to_string();
+    goal(dir.path(), &["delete", &id]);
+    let out = goal(dir.path(), &["undo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(list.contains("my task"));
+}
+
+#[test]
+fn undo_delete_subtree() {
+    let dir = TempDir::new().unwrap();
+    let pid = stdout(&goal(dir.path(), &["add", "parent"])).trim().to_string();
+    goal(dir.path(), &["add", "child", "--parent", &pid]);
+    goal(dir.path(), &["delete", &pid]);
+    let out = goal(dir.path(), &["undo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(list.contains("parent"));
+    assert!(list.contains("child"));
+}
+
+#[test]
+fn undo_modify_body() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "old body"])).trim().to_string();
+    goal(dir.path(), &["modify", &id, "--body", "new body"]);
+    let out = goal(dir.path(), &["undo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(list.contains("old body"));
+    assert!(!list.contains("new body"));
+}
+
+#[test]
+fn undo_modify_reparent() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "B"])).trim().to_string();
+    assert_eq!(&b[1..2], "0");
+    goal(dir.path(), &["modify", &b, "--parent", &a]);
+    let out = goal(dir.path(), &["undo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    // B should be back at depth 0 (original id restored)
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(list.contains(&b), "old B id should be restored: {}", b);
+}
+
+#[test]
+fn double_undo() {
+    let dir = TempDir::new().unwrap();
+    goal(dir.path(), &["add", "X"]);
+    goal(dir.path(), &["add", "Y"]);
+    goal(dir.path(), &["undo"]);
+    let list1 = stdout(&goal(dir.path(), &["list"]));
+    assert!(list1.contains("X"));
+    assert!(!list1.contains("Y"));
+    goal(dir.path(), &["undo"]);
+    let list2 = stdout(&goal(dir.path(), &["list"]));
+    assert!(!list2.contains("X"));
+}
+
+#[test]
+fn undo_nothing_errors() {
+    let dir = TempDir::new().unwrap();
+    let out = goal(dir.path(), &["undo"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("nothing to undo"));
+}
+
+#[test]
+fn log_shows_history() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "learn rust"])).trim().to_string();
+    goal(dir.path(), &["done", &id]);
+    let log = stdout(&goal(dir.path(), &["log"]));
+    assert!(log.contains("Add"));
+    assert!(log.contains("Done"));
+    assert!(log.contains("learn rust"));
+}
+
+#[test]
+fn log_after_undo_removes_entry() {
+    let dir = TempDir::new().unwrap();
+    goal(dir.path(), &["add", "learn rust"]);
+    goal(dir.path(), &["undo"]);
+    let log = stdout(&goal(dir.path(), &["log"]));
+    assert!(!log.contains("Add"), "undone event should not appear in log: {}", log);
+}
+
+#[test]
 fn nonexistent_id_errors() {
     let dir = TempDir::new().unwrap();
 

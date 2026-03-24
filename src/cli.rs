@@ -39,4 +39,6 @@ pub enum Command {
     Delete {
         id: String,
     },
+    Undo,
+    Log,
 }

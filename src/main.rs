@@ -62,6 +62,13 @@ fn main() -> Result<()> {
             let full_id = db::resolve_id(&conn, &id)?;
             db::remove_goal(&conn, &full_id)?;
         }
+        Command::Undo => {
+            db::undo_last(&conn)?;
+        }
+        Command::Log => {
+            let events = db::list_events(&conn)?;
+            display::print_log(&events);
+        }
     }
 
     Ok(())
