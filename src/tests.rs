@@ -644,6 +644,63 @@ fn tags_cascade_on_goal_delete() {
 }
 
 #[test]
+fn old_id_resolves_with_warning_after_reparent() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "B"])).trim().to_string();
+
+    // Reparent B under A — B gets a new ID
+    let out = goal(dir.path(), &["modify", &b, "--parent", &a]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let new_b = stdout(&out).trim().to_string();
+    assert_ne!(b, new_b, "id should change on reparent");
+
+    // Reference B by its old id — should succeed with a warning on stderr
+    let info = goal(dir.path(), &["info", &b]);
+    assert!(info.status.success(), "old id should still resolve: {}", stderr(&info));
+    assert!(stdout(&info).contains("B"), "should show B's body");
+    assert!(stderr(&info).contains("warning"), "should print a warning about the renamed id");
+    assert!(stderr(&info).contains(&b), "warning should mention old id");
+    assert!(stderr(&info).contains(&new_b), "warning should mention new id");
+}
+
+#[test]
+fn old_id_prefix_resolves_with_warning_after_reparent() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "B"])).trim().to_string();
+    let prefix = &b[..6];
+
+    goal(dir.path(), &["modify", &b, "--parent", &a]);
+
+    let info = goal(dir.path(), &["info", prefix]);
+    assert!(info.status.success(), "old id prefix should resolve: {}", stderr(&info));
+    assert!(stderr(&info).contains("warning"));
+}
+
+#[test]
+fn old_id_after_double_reparent_resolves_to_final() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "B"])).trim().to_string();
+    let c = stdout(&goal(dir.path(), &["add", "C"])).trim().to_string();
+
+    // B -> under A
+    let out1 = goal(dir.path(), &["modify", &b, "--parent", &a]);
+    let b1 = stdout(&out1).trim().to_string();
+    // B -> under C (detach first then reparent, or just reparent under C)
+    let out2 = goal(dir.path(), &["modify", &b1, "--parent", &c]);
+    let b2 = stdout(&out2).trim().to_string();
+
+    // Original B id should resolve directly to b2 (chained alias collapsed)
+    let info = goal(dir.path(), &["info", &b]);
+    assert!(info.status.success(), "original id should resolve after double reparent: {}", stderr(&info));
+    assert!(stdout(&info).contains("B"));
+    assert!(stderr(&info).contains("warning"), "should print a warning");
+    assert!(stderr(&info).contains(&b2), "warning should point to final id");
+}
+
+#[test]
 fn tags_no_tags_no_suffix() {
     let dir = TempDir::new().unwrap();
     goal(dir.path(), &["add", "plain goal"]);

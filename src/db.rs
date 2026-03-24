@@ -156,6 +156,10 @@ pub fn open_db() -> Result<Connection> {
             goal_id    TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
             tag        TEXT NOT NULL,
             PRIMARY KEY (goal_id, tag)
+        );
+        CREATE TABLE IF NOT EXISTS id_aliases (
+            old_id  TEXT PRIMARY KEY,
+            new_id  TEXT NOT NULL
         );",
     )?;
     Ok(conn)
@@ -178,9 +182,27 @@ pub fn resolve_id(conn: &Connection, prefix: &str) -> Result<String> {
         .query_map([&pattern], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     match ids.len() {
+        1 => return Ok(ids.into_iter().next().unwrap()),
+        n if n > 1 => bail!("ambiguous prefix '{}' matches {} goals", prefix, ids.len()),
+        _ => {}
+    }
+
+    // No direct match — try alias table
+    let alias_pattern = format!("{}%", prefix);
+    let mut stmt2 = conn.prepare(
+        "SELECT a.old_id, a.new_id FROM id_aliases a WHERE a.old_id LIKE ?1",
+    )?;
+    let alias_rows: Vec<(String, String)> = stmt2
+        .query_map([&alias_pattern], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    match alias_rows.len() {
         0 => bail!("no goal matching '{}'", prefix),
-        1 => Ok(ids.into_iter().next().unwrap()),
-        _ => bail!("ambiguous prefix '{}' matches {} goals", prefix, ids.len()),
+        1 => {
+            let (old_id, new_id) = alias_rows.into_iter().next().unwrap();
+            eprintln!("warning: '{}' was renamed to '{}'; using new id", old_id, new_id);
+            Ok(new_id)
+        }
+        _ => bail!("ambiguous prefix '{}' matches {} goal aliases", prefix, alias_rows.len()),
     }
 }
 
@@ -369,6 +391,17 @@ pub fn modify_goal(
             tx.execute(
                 "INSERT INTO goals (id, parent_id, body, achieved) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![new_id, new_node_parent_id, node_body, node.achieved as i32],
+            )?;
+            // Record alias: old_id -> new_id. If old_id already has an alias
+            // pointing to it, update that alias to skip the middle step.
+            tx.execute(
+                "INSERT INTO id_aliases (old_id, new_id) VALUES (?1, ?2)
+                 ON CONFLICT(old_id) DO UPDATE SET new_id = excluded.new_id",
+                rusqlite::params![node.id, new_id],
+            )?;
+            tx.execute(
+                "UPDATE id_aliases SET new_id = ?1 WHERE new_id = ?2",
+                rusqlite::params![new_id, node.id],
             )?;
         }
         record_event(&tx, "Modify", &subtree, Some(&new_root_id))?;
