@@ -104,8 +104,9 @@ fn done_and_undone() {
     let done = goal(dir.path(), &["done", &id]);
     assert!(done.status.success(), "{}", stderr(&done));
 
-    let list = goal(dir.path(), &["list"]);
-    assert!(stdout(&list).contains("[x]"));
+    // done goals are excluded from list; use info to check status
+    let info = goal(dir.path(), &["info", &id]);
+    assert!(stdout(&info).contains("achieved"), "{}", stdout(&info));
 
     let undone = goal(dir.path(), &["undone", &id]);
     assert!(undone.status.success());
@@ -328,8 +329,9 @@ fn undo_undone() {
     goal(dir.path(), &["undone", &id]);
     let out = goal(dir.path(), &["undo"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    let list = stdout(&goal(dir.path(), &["list"]));
-    assert!(list.contains("[x]"));
+    // undoing `undone` reverts to achieved; done goals are hidden from list, use info
+    let info = stdout(&goal(dir.path(), &["info", &id]));
+    assert!(info.contains("achieved"), "{}", info);
 }
 
 #[test]
@@ -708,4 +710,323 @@ fn tags_no_tags_no_suffix() {
     goal(dir.path(), &["add", "plain goal"]);
     let list = stdout(&goal(dir.path(), &["list"]));
     assert!(!list.contains('+'), "goal with no tags should not show '+': {}", list);
+}
+
+#[test]
+fn prioritize_basic() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "goal B"])).trim().to_string();
+
+    // Without priority: B is newer, B appears first (higher rowid = higher priority)
+    let list_before = stdout(&goal(dir.path(), &["list"]));
+    let a_pos = list_before.find("goal A").unwrap();
+    let b_pos = list_before.find("goal B").unwrap();
+    assert!(b_pos < a_pos, "newer B should appear before older A before prioritize");
+
+    // Prioritize A over B
+    let out = goal(dir.path(), &["rank",&a, &b]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let list_after = stdout(&goal(dir.path(), &["list"]));
+    let a_pos2 = list_after.find("goal A").unwrap();
+    let b_pos2 = list_after.find("goal B").unwrap();
+    assert!(a_pos2 < b_pos2, "A should appear before B after prioritize");
+}
+
+#[test]
+fn prioritize_cycle_direct() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "B"])).trim().to_string();
+
+    goal(dir.path(), &["rank",&a, &b]);
+    let out = goal(dir.path(), &["rank",&b, &a]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("cycle"), "{}", stderr(&out));
+}
+
+#[test]
+fn prioritize_cycle_transitive() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "B"])).trim().to_string();
+    let c = stdout(&goal(dir.path(), &["add", "C"])).trim().to_string();
+
+    goal(dir.path(), &["rank",&a, &b]);
+    goal(dir.path(), &["rank",&b, &c]);
+    let out = goal(dir.path(), &["rank",&c, &a]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("cycle"), "{}", stderr(&out));
+}
+
+#[test]
+fn prioritize_self_loop() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "A"])).trim().to_string();
+    let out = goal(dir.path(), &["rank",&a, &a]);
+    assert!(!out.status.success());
+}
+
+#[test]
+fn prioritize_duplicate() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "B"])).trim().to_string();
+
+    let out1 = goal(dir.path(), &["rank",&a, &b]);
+    assert!(out1.status.success(), "{}", stderr(&out1));
+    let out2 = goal(dir.path(), &["rank",&a, &b]);
+    assert!(!out2.status.success(), "duplicate edge should fail");
+}
+
+#[test]
+fn deprioritize_reverts_ordering() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "B"])).trim().to_string();
+
+    goal(dir.path(), &["rank",&a, &b]);
+    let out = goal(dir.path(), &["unrank",&a, &b]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // After removing edge, B (newer) should rank before A again
+    let list = stdout(&goal(dir.path(), &["list"]));
+    let a_pos = list.find('A').unwrap();
+    let b_pos = list.find('B').unwrap();
+    assert!(b_pos < a_pos, "B should rank before A after deprioritize: {}", list);
+}
+
+#[test]
+fn deprioritize_nonexistent_fails() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "B"])).trim().to_string();
+    let out = goal(dir.path(), &["unrank",&a, &b]);
+    assert!(!out.status.success());
+}
+
+#[test]
+fn undo_prioritize() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "B"])).trim().to_string();
+
+    goal(dir.path(), &["rank",&a, &b]);
+    let out = goal(dir.path(), &["undo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // After undo, B (newer) should rank before A again
+    let list = stdout(&goal(dir.path(), &["list"]));
+    let a_pos = list.find('A').unwrap();
+    let b_pos = list.find('B').unwrap();
+    assert!(b_pos < a_pos, "B should rank before A after undo prioritize: {}", list);
+}
+
+#[test]
+fn undo_deprioritize() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "B"])).trim().to_string();
+
+    goal(dir.path(), &["rank",&a, &b]);
+    goal(dir.path(), &["unrank",&a, &b]);
+    let out = goal(dir.path(), &["undo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // After undoing deprioritize, A should be ranked before B again
+    let list = stdout(&goal(dir.path(), &["list"]));
+    let a_pos = list.find('A').unwrap();
+    let b_pos = list.find('B').unwrap();
+    assert!(a_pos < b_pos, "A should rank before B after undo deprioritize: {}", list);
+}
+
+#[test]
+fn undo_delete_restores_edges() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "goal B"])).trim().to_string();
+
+    goal(dir.path(), &["rank",&a, &b]);
+    goal(dir.path(), &["delete", "--yes", &a]);
+    let out = goal(dir.path(), &["undo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // After undo: A is restored and edge A>B should be restored too
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(list.contains("goal A"), "A should be restored");
+    assert!(list.contains("goal B"), "B should still be there");
+    let a_pos = list.find("goal A").unwrap();
+    let b_pos = list.find("goal B").unwrap();
+    assert!(a_pos < b_pos, "A should rank before B after edge restored: {}", list);
+}
+
+#[test]
+fn delete_middle_collapses_transitively() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "goal B"])).trim().to_string();
+    let c = stdout(&goal(dir.path(), &["add", "goal C"])).trim().to_string();
+
+    goal(dir.path(), &["rank",&a, &b]);
+    goal(dir.path(), &["rank",&b, &c]);
+
+    // Delete B; A>C should be synthesized
+    let out = goal(dir.path(), &["delete", "--yes", &b]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(!list.contains("goal B"), "B should be deleted");
+    let a_pos = list.find("goal A").unwrap();
+    let c_pos = list.find("goal C").unwrap();
+    assert!(a_pos < c_pos, "A should still rank before C after transitive collapse: {}", list);
+}
+
+#[test]
+fn undo_delete_middle_restores_original_edges() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "goal B"])).trim().to_string();
+    let c = stdout(&goal(dir.path(), &["add", "goal C"])).trim().to_string();
+
+    goal(dir.path(), &["rank",&a, &b]);
+    goal(dir.path(), &["rank",&b, &c]);
+    goal(dir.path(), &["delete", "--yes", &b]);
+
+    let out = goal(dir.path(), &["undo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(list.contains("goal B"), "B should be restored");
+    // A>B>C chain should be restored (A first, then B, then C)
+    let a_pos = list.find("goal A").unwrap();
+    let b_pos = list.find("goal B").unwrap();
+    let c_pos = list.find("goal C").unwrap();
+    assert!(a_pos < b_pos, "A should rank before B");
+    assert!(b_pos < c_pos, "B should rank before C");
+}
+
+#[test]
+fn tiebreak_newer_higher_priority() {
+    let dir = TempDir::new().unwrap();
+    // A added first, B added second; no priority edges
+    goal(dir.path(), &["add", "goal A"]);
+    goal(dir.path(), &["add", "goal B"]);
+
+    let list = stdout(&goal(dir.path(), &["list"]));
+    let a_pos = list.find("goal A").unwrap();
+    let b_pos = list.find("goal B").unwrap();
+    assert!(b_pos < a_pos, "newer B should rank before older A by default: {}", list);
+}
+
+#[test]
+fn linked_beats_unlinked() {
+    let dir = TempDir::new().unwrap();
+    // Add A first (older), then B (newer), then C (newest)
+    let a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "goal B"])).trim().to_string();
+    let c = stdout(&goal(dir.path(), &["add", "goal C"])).trim().to_string();
+
+    // Link A>B; C is unlinked
+    goal(dir.path(), &["rank",&a, &b]);
+
+    let list = stdout(&goal(dir.path(), &["list"]));
+    let a_pos = list.find("goal A").unwrap();
+    let c_pos = list.find("goal C").unwrap();
+    // A is linked, C is unlinked; A should rank before C regardless of age
+    assert!(a_pos < c_pos, "linked A should rank before unlinked C: {}", list);
+    let _ = (b, c);
+}
+
+#[test]
+fn done_goals_excluded_from_list() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    goal(dir.path(), &["add", "goal B"]);
+
+    goal(dir.path(), &["done", &a]);
+
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(!list.contains("goal A"), "done goal A should be excluded from list: {}", list);
+    assert!(list.contains("goal B"), "pending goal B should appear: {}", list);
+}
+
+#[test]
+fn long_chain_ordering() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "goal B"])).trim().to_string();
+    let c = stdout(&goal(dir.path(), &["add", "goal C"])).trim().to_string();
+    let d = stdout(&goal(dir.path(), &["add", "goal D"])).trim().to_string();
+    let e = stdout(&goal(dir.path(), &["add", "goal E"])).trim().to_string();
+
+    goal(dir.path(), &["rank",&a, &b]);
+    goal(dir.path(), &["rank",&b, &c]);
+    goal(dir.path(), &["rank",&c, &d]);
+    goal(dir.path(), &["rank",&d, &e]);
+
+    let list = stdout(&goal(dir.path(), &["list"]));
+    let a_pos = list.find("goal A").unwrap();
+    let b_pos = list.find("goal B").unwrap();
+    let c_pos = list.find("goal C").unwrap();
+    let d_pos = list.find("goal D").unwrap();
+    let e_pos = list.find("goal E").unwrap();
+    assert!(a_pos < b_pos, "A before B");
+    assert!(b_pos < c_pos, "B before C");
+    assert!(c_pos < d_pos, "C before D");
+    assert!(d_pos < e_pos, "D before E");
+}
+
+#[test]
+fn diamond_ordering() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "goal B"])).trim().to_string();
+    let c = stdout(&goal(dir.path(), &["add", "goal C"])).trim().to_string();
+    let d = stdout(&goal(dir.path(), &["add", "goal D"])).trim().to_string();
+
+    // Diamond: A > B, A > C, B > D, C > D
+    goal(dir.path(), &["rank",&a, &b]);
+    goal(dir.path(), &["rank",&a, &c]);
+    goal(dir.path(), &["rank",&b, &d]);
+    goal(dir.path(), &["rank",&c, &d]);
+
+    let list = stdout(&goal(dir.path(), &["list"]));
+    let a_pos = list.find("goal A").unwrap();
+    let d_pos = list.find("goal D").unwrap();
+    assert!(a_pos < d_pos, "A should come before D in diamond");
+}
+
+#[test]
+fn reparent_migrates_edges() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "goal B"])).trim().to_string();
+
+    goal(dir.path(), &["rank",&a, &b]);
+
+    // Reparent A (A gets a new ID)
+    let out = goal(dir.path(), &["modify", &a, "--continuous"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let new_a = stdout(&out).trim().to_string();
+    assert_ne!(a, new_a, "id should change after modify kind");
+
+    // Edge should have migrated: adding the reverse edge (new_a < b) should fail with cycle error
+    let cycle_out = goal(dir.path(), &["rank",&b, &new_a]);
+    assert!(!cycle_out.status.success(), "reverse edge should be rejected as a cycle (edge was migrated)");
+    assert!(stderr(&cycle_out).contains("cycle"), "{}", stderr(&cycle_out));
+}
+
+#[test]
+fn prioritize_then_done() {
+    let dir = TempDir::new().unwrap();
+    let a = stdout(&goal(dir.path(), &["add", "goal A"])).trim().to_string();
+    let b = stdout(&goal(dir.path(), &["add", "goal B"])).trim().to_string();
+
+    goal(dir.path(), &["rank",&a, &b]);
+    goal(dir.path(), &["done", &a]);
+
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(!list.contains("goal A"), "done A should be excluded");
+    assert!(list.contains("goal B"), "B should still appear");
 }

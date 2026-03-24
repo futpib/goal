@@ -160,8 +160,15 @@ pub fn open_db() -> Result<Connection> {
         CREATE TABLE IF NOT EXISTS id_aliases (
             old_id  TEXT PRIMARY KEY,
             new_id  TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS priority_edges (
+            higher_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+            lower_id  TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+            PRIMARY KEY (higher_id, lower_id)
         );",
     )?;
+    let _ = conn.execute_batch("ALTER TABLE events ADD COLUMN snapshot_edges TEXT");
+    let _ = conn.execute_batch("ALTER TABLE events_undone ADD COLUMN snapshot_edges TEXT");
     Ok(conn)
 }
 
@@ -311,13 +318,84 @@ pub fn set_achieved(conn: &Connection, id: &str, achieved: bool) -> Result<()> {
 
 pub fn remove_goal(conn: &Connection, id: &str) -> Result<()> {
     let subtree = collect_subtree(conn, id)?;
-    let tx = conn.unchecked_transaction()?;
-    let changed = tx.execute("DELETE FROM goals WHERE id = ?1", [id])?;
-    if changed == 0 {
-        bail!("no goal with id '{}'", id);
+    let subtree_ids: std::collections::HashSet<&str> = subtree.iter().map(|g| g.id.as_str()).collect();
+
+    // Collect all priority edges touching the subtree
+    let mut removed_edges: Vec<(String, String)> = Vec::new();
+    for node in &subtree {
+        let mut stmt = conn.prepare(
+            "SELECT higher_id, lower_id FROM priority_edges WHERE higher_id = ?1 OR lower_id = ?1",
+        )?;
+        let edges: Vec<(String, String)> = stmt
+            .query_map([&node.id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for edge in edges {
+            if !removed_edges.contains(&edge) {
+                removed_edges.push(edge);
+            }
+        }
     }
-    record_event(&tx, "Delete", &subtree, None)?;
-    tx.commit()?;
+
+    // Compute transitive collapse: for each deleted node, connect its uppers to its lowers
+    let mut added_edges: Vec<(String, String)> = Vec::new();
+    for node in &subtree {
+        let uppers: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT higher_id FROM priority_edges WHERE lower_id = ?1",
+            )?;
+            stmt.query_map([&node.id], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let lowers: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT lower_id FROM priority_edges WHERE higher_id = ?1",
+            )?;
+            stmt.query_map([&node.id], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for upper in &uppers {
+            if subtree_ids.contains(upper.as_str()) {
+                continue;
+            }
+            for lower in &lowers {
+                if subtree_ids.contains(lower.as_str()) {
+                    continue;
+                }
+                let new_edge = (upper.clone(), lower.clone());
+                if !added_edges.contains(&new_edge) && !removed_edges.contains(&new_edge) {
+                    added_edges.push(new_edge);
+                }
+            }
+        }
+    }
+
+    let edge_snapshot = EdgeSnapshot { removed: removed_edges, added: added_edges.clone() };
+    let snapshot_edges_json = serde_json::to_string(&edge_snapshot)?;
+
+    conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    let tx_result = (|| -> Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        // Insert synthetic transitive edges before goals are deleted
+        for (h, l) in &added_edges {
+            tx.execute(
+                "INSERT OR IGNORE INTO priority_edges (higher_id, lower_id) VALUES (?1, ?2)",
+                rusqlite::params![h, l],
+            )?;
+        }
+        // Delete all subtree nodes explicitly (foreign_keys is OFF, cascades don't fire)
+        for node in &subtree {
+            tx.execute("DELETE FROM goals WHERE id = ?1", [&node.id])?;
+        }
+        let event_id = record_event(&tx, "Delete", &subtree, None)?;
+        tx.execute(
+            "UPDATE events SET snapshot_edges = ?1 WHERE event_id = ?2",
+            rusqlite::params![snapshot_edges_json, event_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    })();
+    conn.execute_batch("PRAGMA foreign_keys = ON")?;
+    tx_result?;
     Ok(())
 }
 
@@ -403,6 +481,15 @@ pub fn modify_goal(
                 "UPDATE id_aliases SET new_id = ?1 WHERE new_id = ?2",
                 rusqlite::params![new_id, node.id],
             )?;
+            // Migrate priority edges to the new ID
+            tx.execute(
+                "UPDATE priority_edges SET higher_id = ?1 WHERE higher_id = ?2",
+                rusqlite::params![new_id, node.id],
+            )?;
+            tx.execute(
+                "UPDATE priority_edges SET lower_id = ?1 WHERE lower_id = ?2",
+                rusqlite::params![new_id, node.id],
+            )?;
         }
         record_event(&tx, "Modify", &subtree, Some(&new_root_id))?;
         tx.commit()?;
@@ -417,7 +504,7 @@ pub fn modify_goal(
 pub fn undo_last(conn: &Connection) -> Result<()> {
     let row = {
         let mut stmt = conn.prepare(
-            "SELECT event_id, op, snapshot, new_id FROM events \
+            "SELECT event_id, op, snapshot, new_id, snapshot_edges FROM events \
              ORDER BY timestamp DESC, rowid DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map([], |row| {
@@ -426,6 +513,7 @@ pub fn undo_last(conn: &Connection) -> Result<()> {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })?;
         match rows.next() {
@@ -433,7 +521,7 @@ pub fn undo_last(conn: &Connection) -> Result<()> {
             Some(r) => r?,
         }
     };
-    let (event_id, op, snapshot_json, new_id) = row;
+    let (event_id, op, snapshot_json, new_id, snapshot_edges) = row;
     let snapshot: Vec<Goal> = serde_json::from_str(&snapshot_json)?;
 
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
@@ -460,6 +548,41 @@ pub fn undo_last(conn: &Connection) -> Result<()> {
                         rusqlite::params![g.id, g.parent_id, g.body, g.achieved as i32],
                     )?;
                 }
+                if let Some(ref edges_json) = snapshot_edges {
+                    let edge_snapshot: EdgeSnapshot = serde_json::from_str(edges_json)?;
+                    // Remove synthetic edges that were added during collapse
+                    for (h, l) in &edge_snapshot.added {
+                        tx.execute(
+                            "DELETE FROM priority_edges WHERE higher_id = ?1 AND lower_id = ?2",
+                            rusqlite::params![h, l],
+                        )?;
+                    }
+                    // Re-insert original edges
+                    for (h, l) in &edge_snapshot.removed {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO priority_edges (higher_id, lower_id) VALUES (?1, ?2)",
+                            rusqlite::params![h, l],
+                        )?;
+                    }
+                }
+            }
+            "Prioritize" => {
+                let (h, l) = parse_edge_new_id(
+                    new_id.as_deref().ok_or_else(|| anyhow::anyhow!("malformed Prioritize event"))?,
+                )?;
+                tx.execute(
+                    "DELETE FROM priority_edges WHERE higher_id = ?1 AND lower_id = ?2",
+                    rusqlite::params![h, l],
+                )?;
+            }
+            "Deprioritize" => {
+                let (h, l) = parse_edge_new_id(
+                    new_id.as_deref().ok_or_else(|| anyhow::anyhow!("malformed Deprioritize event"))?,
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO priority_edges (higher_id, lower_id) VALUES (?1, ?2)",
+                    rusqlite::params![h, l],
+                )?;
             }
             "Modify" => {
                 let target = new_id.as_deref()
@@ -476,7 +599,8 @@ pub fn undo_last(conn: &Connection) -> Result<()> {
         }
         // Archive the event before deleting it
         tx.execute(
-            "INSERT INTO events_undone SELECT * FROM events WHERE event_id = ?1",
+            "INSERT INTO events_undone (event_id, timestamp, op, snapshot, new_id, snapshot_edges) \
+             SELECT event_id, timestamp, op, snapshot, new_id, snapshot_edges FROM events WHERE event_id = ?1",
             [&event_id],
         )?;
         tx.execute("DELETE FROM events WHERE event_id = ?1", [&event_id])?;
@@ -486,6 +610,209 @@ pub fn undo_last(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON")?;
     tx_result?;
     Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+struct EdgeSnapshot {
+    removed: Vec<(String, String)>,
+    added: Vec<(String, String)>,
+}
+
+fn would_create_cycle(conn: &Connection, higher_id: &str, lower_id: &str) -> Result<bool> {
+    // A cycle exists if lower_id can reach higher_id by following existing downward edges.
+    // (i.e., lower_id already ranks higher than ... higher_id somehow)
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE reachable(id) AS (
+            SELECT pe.lower_id FROM priority_edges pe WHERE pe.higher_id = ?1
+            UNION
+            SELECT pe2.lower_id FROM priority_edges pe2 JOIN reachable r ON pe2.higher_id = r.id
+         )
+         SELECT id FROM reachable WHERE id = ?2",
+    )?;
+    let rows: Vec<String> = stmt
+        .query_map(rusqlite::params![lower_id, higher_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(!rows.is_empty())
+}
+
+fn parse_edge_new_id(s: &str) -> Result<(String, String)> {
+    let pos = s.find(':')
+        .ok_or_else(|| anyhow::anyhow!("malformed edge new_id: '{}'", s))?;
+    Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
+}
+
+pub fn add_priority_edge(conn: &Connection, higher_id: &str, lower_id: &str) -> Result<()> {
+    if higher_id == lower_id {
+        bail!("cannot prioritize a goal over itself");
+    }
+    let already_exists: bool = conn.query_row(
+        "SELECT 1 FROM priority_edges WHERE higher_id = ?1 AND lower_id = ?2",
+        rusqlite::params![higher_id, lower_id],
+        |_| Ok(true),
+    ).unwrap_or(false);
+    if already_exists {
+        bail!("priority edge already exists: {} > {}", higher_id, lower_id);
+    }
+    if would_create_cycle(conn, higher_id, lower_id)? {
+        bail!("adding this priority relation would create a cycle");
+    }
+    let higher_goal = get_goal(conn, higher_id)?;
+    let lower_goal = get_goal(conn, lower_id)?;
+    let snapshot_json = serde_json::to_string(&[&higher_goal, &lower_goal])?;
+    let event_id = generate_event_id();
+    let new_id_str = format!("{}:{}", higher_id, lower_id);
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO priority_edges (higher_id, lower_id) VALUES (?1, ?2)",
+        rusqlite::params![higher_id, lower_id],
+    )?;
+    tx.execute(
+        "INSERT INTO events (event_id, timestamp, op, snapshot, new_id) \
+         VALUES (?1, datetime('now'), 'Prioritize', ?2, ?3)",
+        rusqlite::params![event_id, snapshot_json, new_id_str],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn remove_priority_edge(conn: &Connection, higher_id: &str, lower_id: &str) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT 1 FROM priority_edges WHERE higher_id = ?1 AND lower_id = ?2",
+        rusqlite::params![higher_id, lower_id],
+        |_| Ok(true),
+    ).unwrap_or(false);
+    if !exists {
+        bail!("no priority edge {} > {}", higher_id, lower_id);
+    }
+    let higher_goal = get_goal(conn, higher_id)?;
+    let lower_goal = get_goal(conn, lower_id)?;
+    let snapshot_json = serde_json::to_string(&[&higher_goal, &lower_goal])?;
+    let event_id = generate_event_id();
+    let new_id_str = format!("{}:{}", higher_id, lower_id);
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM priority_edges WHERE higher_id = ?1 AND lower_id = ?2",
+        rusqlite::params![higher_id, lower_id],
+    )?;
+    tx.execute(
+        "INSERT INTO events (event_id, timestamp, op, snapshot, new_id) \
+         VALUES (?1, datetime('now'), 'Deprioritize', ?2, ?3)",
+        rusqlite::params![event_id, snapshot_json, new_id_str],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn all_priority_edges(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT higher_id, lower_id FROM priority_edges")?;
+    let edges = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(edges)
+}
+
+pub fn goal_rowids(conn: &Connection) -> Result<std::collections::HashMap<String, i64>> {
+    let mut stmt = conn.prepare("SELECT id, rowid FROM goals")?;
+    let mut map = std::collections::HashMap::new();
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+    for row in rows {
+        let (id, rowid) = row?;
+        map.insert(id, rowid);
+    }
+    Ok(map)
+}
+
+pub fn compute_priority_order(
+    goals: &[Goal],
+    edges: &[(String, String)],
+    rowids: &std::collections::HashMap<String, i64>,
+) -> Vec<String> {
+    use std::collections::{HashMap, HashSet, BinaryHeap};
+    use std::cmp::Ordering;
+
+    let goal_ids: HashSet<&str> = goals.iter().map(|g| g.id.as_str()).collect();
+
+    // Only consider edges where both endpoints are in the current goal set
+    let active_edges: Vec<(&str, &str)> = edges.iter()
+        .filter(|(h, l)| goal_ids.contains(h.as_str()) && goal_ids.contains(l.as_str()))
+        .map(|(h, l)| (h.as_str(), l.as_str()))
+        .collect();
+
+    let linked_ids: HashSet<&str> = active_edges.iter()
+        .flat_map(|(h, l)| [*h, *l])
+        .collect();
+
+    // Build adjacency: higher -> [lower]
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut in_degree: HashMap<&str, usize> = HashMap::new();
+    for g in goals {
+        in_degree.entry(g.id.as_str()).or_insert(0);
+    }
+    for (h, l) in &active_edges {
+        adj.entry(h).or_default().push(l);
+        *in_degree.entry(l).or_insert(0) += 1;
+    }
+
+    // Comparator: higher priority = smaller ordering value for BinaryHeap (max-heap)
+    // We wrap IDs in a struct that reverses comparisons to get max-heap behavior.
+    #[derive(Eq, PartialEq)]
+    struct Item {
+        id: String,
+        linked: bool,
+        rowid: i64,
+    }
+    impl Ord for Item {
+        fn cmp(&self, other: &Self) -> Ordering {
+            match (self.linked, other.linked) {
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                _ => self.rowid.cmp(&other.rowid),
+            }
+        }
+    }
+    impl PartialOrd for Item {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    let make_item = |id: &str| Item {
+        id: id.to_string(),
+        linked: linked_ids.contains(id),
+        rowid: *rowids.get(id).unwrap_or(&0),
+    };
+
+    let mut heap: BinaryHeap<Item> = goals.iter()
+        .filter(|g| in_degree.get(g.id.as_str()).copied().unwrap_or(0) == 0)
+        .map(|g| make_item(g.id.as_str()))
+        .collect();
+
+    let mut result = Vec::with_capacity(goals.len());
+    while let Some(item) = heap.pop() {
+        if let Some(lowers) = adj.get(item.id.as_str()) {
+            let lowers_copy: Vec<&str> = lowers.clone();
+            for lower in lowers_copy {
+                let deg = in_degree.entry(lower).or_insert(0);
+                if *deg > 0 {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        heap.push(make_item(lower));
+                    }
+                }
+            }
+        }
+        result.push(item.id);
+    }
+
+    // Append any goals not reached (shouldn't happen with a valid DAG, but be safe)
+    let in_result: HashSet<&str> = result.iter().map(|s| s.as_str()).collect();
+    let missing: Vec<String> = goals.iter()
+        .filter(|g| !in_result.contains(g.id.as_str()))
+        .map(|g| g.id.clone())
+        .collect();
+    result.extend(missing);
+
+    result
 }
 
 pub fn list_events(conn: &Connection) -> Result<Vec<Event>> {

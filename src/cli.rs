@@ -58,4 +58,12 @@ pub enum Command {
     },
     Undo,
     Log,
+    Rank {
+        higher: String,
+        lower: String,
+    },
+    Unrank {
+        higher: String,
+        lower: String,
+    },
 }

@@ -1,13 +1,17 @@
 use crate::db::{parse_depth, Annotation, Event, Goal, GoalKind};
 use std::collections::HashMap;
 
-pub fn print_tree(goals: &[Goal], tags: &HashMap<String, Vec<String>>) {
+pub fn print_tree(goals: &[Goal], tags: &HashMap<String, Vec<String>>, ranks: &HashMap<String, usize>) {
     let mut by_parent: HashMap<Option<String>, Vec<&Goal>> = HashMap::new();
     for goal in goals {
         by_parent.entry(goal.parent_id.clone()).or_default().push(goal);
     }
     for bucket in by_parent.values_mut() {
-        bucket.sort_by(|a, b| a.id.cmp(&b.id));
+        bucket.sort_by(|a, b| {
+            let ra = ranks.get(&a.id).copied().unwrap_or(usize::MAX);
+            let rb = ranks.get(&b.id).copied().unwrap_or(usize::MAX);
+            ra.cmp(&rb).then(a.id.cmp(&b.id))
+        });
     }
     print_node(&by_parent, tags, None, 0);
 }

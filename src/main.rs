@@ -5,6 +5,7 @@ mod display;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Args, Command};
+use std::collections::HashMap;
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -41,8 +42,15 @@ fn main() -> Result<()> {
         }
         Command::List => {
             let goals = db::all_goals(&conn)?;
+            let pending: Vec<_> = goals.into_iter().filter(|g| !g.achieved).collect();
             let tags = db::all_goal_tags(&conn)?;
-            display::print_tree(&goals, &tags);
+            let edges = db::all_priority_edges(&conn)?;
+            let rowids = db::goal_rowids(&conn)?;
+            let ordered_ids = db::compute_priority_order(&pending, &edges, &rowids);
+            let ranks: HashMap<String, usize> = ordered_ids.iter().enumerate()
+                .map(|(i, id)| (id.clone(), i + 1))
+                .collect();
+            display::print_tree(&pending, &tags, &ranks);
         }
         Command::Modify { id, body, parent, no_parent, continuous, achievable, tags } => {
             if body.is_none() && parent.is_none() && !no_parent && !continuous && !achievable && tags.is_empty() {
@@ -116,6 +124,16 @@ fn main() -> Result<()> {
         Command::Log => {
             let events = db::list_events(&conn)?;
             display::print_log(&events);
+        }
+        Command::Rank { higher, lower } => {
+            let h = db::resolve_id(&conn, &higher)?;
+            let l = db::resolve_id(&conn, &lower)?;
+            db::add_priority_edge(&conn, &h, &l)?;
+        }
+        Command::Unrank { higher, lower } => {
+            let h = db::resolve_id(&conn, &higher)?;
+            let l = db::resolve_id(&conn, &lower)?;
+            db::remove_priority_edge(&conn, &h, &l)?;
         }
     }
 
