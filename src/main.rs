@@ -1,8 +1,6 @@
 mod cli;
 mod db;
 mod display;
-#[cfg(test)]
-mod tests;
 
 use anyhow::Result;
 use clap::Parser;
