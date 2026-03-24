@@ -1,7 +1,7 @@
 use crate::db::{parse_depth, Annotation, Event, Goal, GoalKind};
 use std::collections::HashMap;
 
-pub fn print_tree(goals: &[Goal]) {
+pub fn print_tree(goals: &[Goal], tags: &HashMap<String, Vec<String>>) {
     let mut by_parent: HashMap<Option<String>, Vec<&Goal>> = HashMap::new();
     for goal in goals {
         by_parent.entry(goal.parent_id.clone()).or_default().push(goal);
@@ -9,10 +9,10 @@ pub fn print_tree(goals: &[Goal]) {
     for bucket in by_parent.values_mut() {
         bucket.sort_by(|a, b| a.id.cmp(&b.id));
     }
-    print_node(&by_parent, None, 0);
+    print_node(&by_parent, tags, None, 0);
 }
 
-pub fn print_info(subtree: &[Goal], annotations: &[Annotation]) {
+pub fn print_info(subtree: &[Goal], annotations: &[Annotation], tags: &HashMap<String, Vec<String>>) {
     let root = &subtree[0];
     let kind_str = match root.kind {
         GoalKind::Achievable => "achievable",
@@ -28,6 +28,11 @@ pub fn print_info(subtree: &[Goal], annotations: &[Annotation]) {
     println!("depth:  {}", parse_depth(&root.id));
     println!("parent: {}", root.parent_id.as_deref().unwrap_or("none"));
     println!("body:   {}", root.body);
+    let root_tags = tags.get(&root.id).map(Vec::as_slice).unwrap_or(&[]);
+    if !root_tags.is_empty() {
+        let tag_str: Vec<String> = root_tags.iter().map(|t| format!("+{}", t)).collect();
+        println!("tags:   {}", tag_str.join(" "));
+    }
     if !annotations.is_empty() {
         println!();
         println!("annotations:");
@@ -38,7 +43,6 @@ pub fn print_info(subtree: &[Goal], annotations: &[Annotation]) {
     if subtree.len() > 1 {
         println!();
         println!("subtree:");
-        // Print the subtree rooted at root, reusing print_node logic
         let mut by_parent: HashMap<Option<String>, Vec<&Goal>> = HashMap::new();
         for goal in subtree {
             by_parent.entry(goal.parent_id.clone()).or_default().push(goal);
@@ -47,12 +51,13 @@ pub fn print_info(subtree: &[Goal], annotations: &[Annotation]) {
             bucket.sort_by(|a, b| a.id.cmp(&b.id));
         }
         let root_depth = parse_depth(&root.id) as usize;
-        print_node_offset(&by_parent, Some(root.id.clone()), root_depth + 1, root_depth + 1);
+        print_node_offset(&by_parent, tags, Some(root.id.clone()), root_depth + 1, root_depth + 1);
     }
 }
 
 fn print_node_offset(
     map: &HashMap<Option<String>, Vec<&Goal>>,
+    tags: &HashMap<String, Vec<String>>,
     parent_id: Option<String>,
     depth: usize,
     base_depth: usize,
@@ -64,8 +69,9 @@ fn print_node_offset(
             GoalKind::Achievable => if goal.achieved { "[x]" } else { "[ ]" },
             GoalKind::Continuous => "[~]",
         };
-        println!("{}{}  {}  {}", indent, marker, goal.id, goal.body);
-        print_node_offset(map, Some(goal.id.clone()), depth + 1, base_depth);
+        let tag_suffix = format_tags(tags.get(&goal.id).map(Vec::as_slice).unwrap_or(&[]));
+        println!("{}{}  {}  {}{}", indent, marker, goal.id, goal.body, tag_suffix);
+        print_node_offset(map, tags, Some(goal.id.clone()), depth + 1, base_depth);
     }
 }
 
@@ -78,7 +84,16 @@ pub fn print_log(events: &[Event]) {
     }
 }
 
-fn print_node(map: &HashMap<Option<String>, Vec<&Goal>>, parent_id: Option<String>, depth: usize) {
+fn format_tags(tags: &[String]) -> String {
+    if tags.is_empty() {
+        String::new()
+    } else {
+        let parts: Vec<String> = tags.iter().map(|t| format!("+{}", t)).collect();
+        format!("  {}", parts.join(" "))
+    }
+}
+
+fn print_node(map: &HashMap<Option<String>, Vec<&Goal>>, tags: &HashMap<String, Vec<String>>, parent_id: Option<String>, depth: usize) {
     let Some(children) = map.get(&parent_id) else {
         return;
     };
@@ -88,7 +103,8 @@ fn print_node(map: &HashMap<Option<String>, Vec<&Goal>>, parent_id: Option<Strin
             GoalKind::Achievable => if goal.achieved { "[x]" } else { "[ ]" },
             GoalKind::Continuous => "[~]",
         };
-        println!("{}{}  {}  {}", indent, marker, goal.id, goal.body);
-        print_node(map, Some(goal.id.clone()), depth + 1);
+        let tag_suffix = format_tags(tags.get(&goal.id).map(Vec::as_slice).unwrap_or(&[]));
+        println!("{}{}  {}  {}{}", indent, marker, goal.id, goal.body, tag_suffix);
+        print_node(map, tags, Some(goal.id.clone()), depth + 1);
     }
 }

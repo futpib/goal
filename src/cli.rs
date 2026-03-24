@@ -15,6 +15,8 @@ pub enum Command {
         parent: Option<String>,
         #[arg(long, short)]
         continuous: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        tags: Vec<String>,
     },
     Done {
         id: String,
@@ -35,6 +37,8 @@ pub enum Command {
         continuous: bool,
         #[arg(long, conflicts_with = "continuous")]
         achievable: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        tags: Vec<String>,
     },
     Delete {
         id: String,

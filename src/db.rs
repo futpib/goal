@@ -151,6 +151,11 @@ pub fn open_db() -> Result<Connection> {
             goal_id    TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
             body       TEXT NOT NULL,
             created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS goal_tags (
+            goal_id    TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+            tag        TEXT NOT NULL,
+            PRIMARY KEY (goal_id, tag)
         );",
     )?;
     Ok(conn)
@@ -544,6 +549,45 @@ pub fn annotations_for(conn: &Connection, goal_id: &str) -> Result<Vec<Annotatio
         })?
         .collect::<rusqlite::Result<_>>()?;
     Ok(anns)
+}
+
+pub fn add_tag(conn: &Connection, goal_id: &str, tag: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO goal_tags (goal_id, tag) VALUES (?1, ?2)",
+        rusqlite::params![goal_id, tag],
+    )?;
+    Ok(())
+}
+
+pub fn remove_tag(conn: &Connection, goal_id: &str, tag: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM goal_tags WHERE goal_id = ?1 AND tag = ?2",
+        rusqlite::params![goal_id, tag],
+    )?;
+    Ok(())
+}
+
+pub fn tags_for(conn: &Connection, goal_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT tag FROM goal_tags WHERE goal_id = ?1 ORDER BY tag ASC",
+    )?;
+    let tags = stmt
+        .query_map([goal_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(tags)
+}
+
+pub fn all_goal_tags(conn: &Connection) -> Result<std::collections::HashMap<String, Vec<String>>> {
+    let mut stmt = conn.prepare("SELECT goal_id, tag FROM goal_tags ORDER BY goal_id, tag")?;
+    let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (goal_id, tag) = row?;
+        map.entry(goal_id).or_default().push(tag);
+    }
+    Ok(map)
 }
 
 pub fn resolve_annotation_id(conn: &Connection, prefix: &str) -> Result<String> {

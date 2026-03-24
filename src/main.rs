@@ -13,7 +13,7 @@ fn main() -> Result<()> {
     let conn = db::open_db()?;
 
     match args.command.unwrap_or(Command::List) {
-        Command::Add { description, parent, continuous } => {
+        Command::Add { description, parent, continuous, tags } => {
             let kind = if continuous {
                 db::GoalKind::Continuous
             } else {
@@ -24,6 +24,13 @@ fn main() -> Result<()> {
                 None => None,
             };
             let id = db::add_goal(&conn, &description, parent_id.as_deref(), &kind)?;
+            for tag in &tags {
+                if let Some(name) = tag.strip_prefix('+') {
+                    db::add_tag(&conn, &id, name)?;
+                } else if let Some(name) = tag.strip_prefix('-') {
+                    db::remove_tag(&conn, &id, name)?;
+                }
+            }
             println!("{}", id);
         }
         Command::Done { id } => {
@@ -36,11 +43,12 @@ fn main() -> Result<()> {
         }
         Command::List => {
             let goals = db::all_goals(&conn)?;
-            display::print_tree(&goals);
+            let tags = db::all_goal_tags(&conn)?;
+            display::print_tree(&goals, &tags);
         }
-        Command::Modify { id, body, parent, no_parent, continuous, achievable } => {
-            if body.is_none() && parent.is_none() && !no_parent && !continuous && !achievable {
-                anyhow::bail!("modify: specify at least one of --body, --parent, --no-parent, --continuous, --achievable");
+        Command::Modify { id, body, parent, no_parent, continuous, achievable, tags } => {
+            if body.is_none() && parent.is_none() && !no_parent && !continuous && !achievable && tags.is_empty() {
+                anyhow::bail!("modify: specify at least one of --body, --parent, --no-parent, --continuous, --achievable, or a tag");
             }
             let full_id = db::resolve_id(&conn, &id)?;
             let new_parent = if no_parent {
@@ -55,7 +63,18 @@ fn main() -> Result<()> {
                 (_, true) => Some(db::GoalKind::Achievable),
                 _ => None,
             };
-            let final_id = db::modify_goal(&conn, &full_id, body.as_deref(), new_parent, new_kind)?;
+            let final_id = if body.is_some() || parent.is_some() || no_parent || continuous || achievable {
+                db::modify_goal(&conn, &full_id, body.as_deref(), new_parent, new_kind)?
+            } else {
+                full_id.clone()
+            };
+            for tag in &tags {
+                if let Some(name) = tag.strip_prefix('+') {
+                    db::add_tag(&conn, &final_id, name)?;
+                } else if let Some(name) = tag.strip_prefix('-') {
+                    db::remove_tag(&conn, &final_id, name)?;
+                }
+            }
             println!("{}", final_id);
         }
         Command::Delete { id, yes } => {
@@ -90,7 +109,8 @@ fn main() -> Result<()> {
             let full_id = db::resolve_id(&conn, &id)?;
             let subtree = db::collect_subtree(&conn, &full_id)?;
             let annotations = db::annotations_for(&conn, &full_id)?;
-            display::print_info(&subtree, &annotations);
+            let tags = db::all_goal_tags(&conn)?;
+            display::print_info(&subtree, &annotations, &tags);
         }
         Command::Undo => {
             db::undo_last(&conn)?;

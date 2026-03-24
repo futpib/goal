@@ -587,3 +587,66 @@ fn annotate_short_prefix() {
     let out = goal(dir.path(), &["annotate", &id, "--delete", prefix]);
     assert!(out.status.success(), "{}", stderr(&out));
 }
+
+#[test]
+fn tags_add_shows_in_list() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "learn rust", "+work", "+rust"])).trim().to_string();
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(list.contains("+work"), "list should show +work: {}", list);
+    assert!(list.contains("+rust"), "list should show +rust: {}", list);
+    let _ = id;
+}
+
+#[test]
+fn tags_add_shows_in_info() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "learn rust", "+work"])).trim().to_string();
+    let info = stdout(&goal(dir.path(), &["info", &id]));
+    assert!(info.contains("tags:"), "info should have tags section: {}", info);
+    assert!(info.contains("+work"), "info should show +work: {}", info);
+}
+
+#[test]
+fn tags_modify_add_and_remove() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "goal", "+work", "+rust"])).trim().to_string();
+
+    let out = goal(dir.path(), &["modify", &id, "-rust", "+personal"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(list.contains("+work"), "should still have +work: {}", list);
+    assert!(list.contains("+personal"), "should now have +personal: {}", list);
+    assert!(!list.contains("+rust"), "should not have +rust anymore: {}", list);
+}
+
+#[test]
+fn tags_only_modify_does_not_require_other_flags() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "goal"])).trim().to_string();
+
+    let out = goal(dir.path(), &["modify", &id, "+newtag"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(list.contains("+newtag"), "should have +newtag: {}", list);
+}
+
+#[test]
+fn tags_cascade_on_goal_delete() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "goal", "+work"])).trim().to_string();
+    goal(dir.path(), &["delete", "--yes", &id]);
+
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(!list.contains("+work"), "deleted goal's tags should not appear: {}", list);
+}
+
+#[test]
+fn tags_no_tags_no_suffix() {
+    let dir = TempDir::new().unwrap();
+    goal(dir.path(), &["add", "plain goal"]);
+    let list = stdout(&goal(dir.path(), &["list"]));
+    assert!(!list.contains('+'), "goal with no tags should not show '+': {}", list);
+}
