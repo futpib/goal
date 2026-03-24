@@ -2,11 +2,13 @@ use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
 
-fn goal_bin() -> String {
-    std::env::var("CARGO_BIN_EXE_goal").unwrap_or_else(|_| {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        format!("{}/target/debug/goal", manifest_dir)
-    })
+fn goal_bin() -> std::path::PathBuf {
+    let mut path = std::env::current_exe().unwrap();
+    path.pop();
+    if path.ends_with("deps") {
+        path.pop();
+    }
+    path.join("goal")
 }
 
 fn goal(data_dir: &Path, args: &[&str]) -> std::process::Output {
