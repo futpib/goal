@@ -57,4 +57,8 @@ Taskwarrior's `undo` is a global last-action undo. `goal undone` directly target
 
 ## Notable gaps in `goal`
 
-- No filtering/querying
+- No filtering/querying (Taskwarrior: `task +tag project:X list`)
+- No annotations / notes on a goal (Taskwarrior: `task 1 annotate "note"`)
+- No priorities or due dates
+- No sync / export
+- No shell completions
