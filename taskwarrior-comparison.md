@@ -29,7 +29,7 @@ Reparenting in `goal` regenerates the ID (and all descendant IDs) to keep the de
 | Undo done | `task undo` (global undo) | `goal undone <id>` (targeted) |
 | Mark not done | no direct command | `goal undone <id>` |
 
-Taskwarrior's `undo` is a global last-action undo. `goal undone` directly targets a specific goal.
+Taskwarrior's `undo` is a global last-action undo. `goal undone` directly targets a specific goal — distinct from `goal undo` which reverts the last operation.
 
 ## Delete / Remove
 
@@ -45,8 +45,17 @@ Taskwarrior's `undo` is a global last-action undo. `goal undone` directly target
 | Filtered | `task +tag project:X list` | — |
 | Single item | `task 1 info` | — |
 
+## Undo / History
+
+| | Taskwarrior | `goal` |
+|---|---|---|
+| Undo last operation | `task undo` | `goal undo` |
+| View history | — | `goal log` |
+| Undo archived | — | `events_undone` table (backup, no CLI) |
+
+`goal` has a complete append-only audit trail with full snapshots. Taskwarrior's undo is limited and has no log command.
+
 ## Notable gaps in `goal`
 
 - No filtering/querying
 - No way to view a single goal's detail or subtree
-- No `undo`
