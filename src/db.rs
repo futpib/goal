@@ -5,6 +5,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
+use strsim;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GoalKind {
@@ -232,7 +233,23 @@ pub fn resolve_id(conn: &Connection, prefix: &str) -> Result<String> {
         .query_map([&alias_pattern], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     match alias_rows.len() {
-        0 => bail!("no goal matching '{}'", prefix),
+        0 => {
+            // Suggest a similar goal ID if one exists
+            let all_ids: Vec<String> = conn
+                .prepare("SELECT id FROM goals WHERE achieved = 0")?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let best = all_ids
+                .iter()
+                .map(|id| (id, strsim::normalized_levenshtein(prefix, id)))
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            match best {
+                Some((suggested, score)) if score >= 0.6 => {
+                    bail!("no goal matching '{}'; did you mean '{}'?", prefix, suggested)
+                }
+                _ => bail!("no goal matching '{}'", prefix),
+            }
+        }
         1 => {
             let (old_id, new_id) = alias_rows.into_iter().next().unwrap();
             eprintln!("warning: '{}' was renamed to '{}'; using new id", old_id, new_id);

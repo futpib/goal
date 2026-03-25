@@ -474,6 +474,46 @@ fn nonexistent_id_errors() {
 }
 
 #[test]
+fn error_output_uses_ansi_color() {
+    let dir = TempDir::new().unwrap();
+    let out = goal(dir.path(), &["done", "a0nonexistent"]);
+    assert!(!out.status.success());
+    // Errors should be prefixed with ANSI color escape sequences
+    assert!(
+        stderr(&out).contains('\x1b'),
+        "expected ANSI escape code in error output, got: {:?}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn similar_goal_suggested_on_typo() {
+    let dir = TempDir::new().unwrap();
+    // Add a goal and record its ID
+    let id = stdout(&goal(dir.path(), &["add", "fix the bug"])).trim().to_string();
+    assert!(id.len() >= 4, "expected goal ID to be at least 4 chars, got: {:?}", id);
+    // Introduce a one-character typo at the end of the full ID
+    let last_char = id.chars().last().unwrap();
+    let replacement = if last_char == 'a' { 'b' } else { 'a' };
+    let typo_id = format!("{}{}", &id[..id.len() - 1], replacement);
+    let out = goal(dir.path(), &["done", &typo_id]);
+    assert!(!out.status.success());
+    // The error message should suggest the correct ID
+    let err = stderr(&out);
+    assert!(
+        err.contains("did you mean"),
+        "expected 'did you mean' suggestion in error, got: {:?}",
+        err
+    );
+    assert!(
+        err.contains(&id),
+        "expected suggested ID '{}' in error, got: {:?}",
+        id,
+        err
+    );
+}
+
+#[test]
 fn delete_yes_flag_skips_prompt() {
     let dir = TempDir::new().unwrap();
     let id = stdout(&goal(dir.path(), &["add", "to delete"])).trim().to_string();

@@ -7,7 +7,14 @@ use clap::Parser;
 use cli::{Args, Command};
 use std::collections::HashMap;
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("\x1b[1;31merror\x1b[0m: {:#}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let args = Args::parse();
     let conn = db::open_db()?;
 
