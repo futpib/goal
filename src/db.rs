@@ -85,6 +85,35 @@ pub fn generate_id(kind: &GoalKind, depth: u32) -> String {
     format!("{}{}", prefix, &random_hex[..random_len])
 }
 
+/// Derive a new ID from an existing one, preserving the random suffix.
+/// Only the type char and depth prefix change; the random portion is reused
+/// as much as possible so the new ID shares the longest common infix with
+/// the old one.
+pub fn derive_id(old_id: &str, new_kind: &GoalKind, new_depth: u32) -> String {
+    let type_char = match new_kind {
+        GoalKind::Achievable => 'a',
+        GoalKind::Continuous => 'c',
+    };
+    let new_depth_str = encode_depth(new_depth);
+    let new_prefix = format!("{}{}", type_char, new_depth_str);
+    let new_random_len = 16usize.saturating_sub(new_prefix.len());
+
+    let old_depth = parse_depth(old_id);
+    let old_prefix_len = 1 + encode_depth(old_depth).len();
+    let old_random = &old_id[old_prefix_len..];
+
+    if old_random.len() >= new_random_len {
+        format!("{}{}", new_prefix, &old_random[..new_random_len])
+    } else {
+        // New prefix is shorter than old; pad the random portion with fresh bytes
+        let extra_len = new_random_len - old_random.len();
+        let mut bytes = vec![0u8; (extra_len + 1) / 2];
+        rand::rng().fill(&mut bytes[..]);
+        let extra_hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        format!("{}{}{}", new_prefix, old_random, &extra_hex[..extra_len])
+    }
+}
+
 pub fn generate_event_id() -> String {
     let mut bytes = [0u8; 8];
     rand::rng().fill(&mut bytes);
@@ -447,7 +476,7 @@ pub fn modify_goal(
         let node_kind = if node.id == id { new_kind.clone() } else { node.kind.clone() };
         let node_old_depth = parse_depth(&node.id) as i32;
         let node_new_depth = (node_old_depth + depth_delta) as u32;
-        id_map.insert(node.id.clone(), generate_id(&node_kind, node_new_depth));
+        id_map.insert(node.id.clone(), derive_id(&node.id, &node_kind, node_new_depth));
     }
 
     let new_root_id = id_map[id].clone();

@@ -1133,3 +1133,97 @@ fn rank_interactive_no_pairs_when_all_ranked() {
     let s = stdout(&out);
     assert!(s.contains("already ordered"), "should say all ordered, got: {}", s);
 }
+
+// Helper: for a 16-char goal ID, return the random suffix (everything after type
+// char and depth chars).
+fn random_suffix(id: &str) -> &str {
+    // type char (1) + depth chars: one 'f' per 15 levels, then one non-'f' terminator
+    let n_f = id[1..].chars().take_while(|&c| c == 'f').count();
+    let prefix_len = 1 + n_f + 1;
+    &id[prefix_len..]
+}
+
+#[test]
+fn modify_kind_preserves_full_random_suffix() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "some goal"])).trim().to_string();
+    // Root achievable: "a0" + 14 random hex chars
+    assert!(id.starts_with("a0"), "expected a0 prefix, got: {}", id);
+    let old_suffix = random_suffix(&id).to_string();
+
+    let out = goal(dir.path(), &["modify", &id, "--continuous"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let new_id = stdout(&out).trim().to_string();
+    assert!(new_id.starts_with("c0"), "expected c0 prefix, got: {}", new_id);
+
+    let new_suffix = random_suffix(&new_id);
+    assert_eq!(
+        new_suffix, old_suffix,
+        "random suffix must be fully preserved when only kind changes (same depth)"
+    );
+}
+
+#[test]
+fn modify_achievable_preserves_full_random_suffix() {
+    let dir = TempDir::new().unwrap();
+    let id = stdout(&goal(dir.path(), &["add", "--continuous", "ongoing"])).trim().to_string();
+    assert!(id.starts_with("c0"), "expected c0 prefix, got: {}", id);
+    let old_suffix = random_suffix(&id).to_string();
+
+    let out = goal(dir.path(), &["modify", &id, "--achievable"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let new_id = stdout(&out).trim().to_string();
+    assert!(new_id.starts_with("a0"), "expected a0 prefix, got: {}", new_id);
+
+    let new_suffix = random_suffix(&new_id);
+    assert_eq!(
+        new_suffix, old_suffix,
+        "random suffix must be fully preserved when only kind changes (same depth)"
+    );
+}
+
+#[test]
+fn modify_reparent_preserves_random_infix() {
+    let dir = TempDir::new().unwrap();
+    let parent = stdout(&goal(dir.path(), &["add", "parent"])).trim().to_string();
+    let child = stdout(&goal(dir.path(), &["add", "child"])).trim().to_string();
+    // child: "a0" + 14 random chars
+    assert!(child.starts_with("a0"), "expected a0 prefix, got: {}", child);
+    let old_suffix = random_suffix(&child).to_string(); // 14 chars
+
+    let out = goal(dir.path(), &["modify", &child, "--parent", &parent]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let new_id = stdout(&out).trim().to_string();
+    // new: "a1" + 13 random chars — longest common infix = first 13 of old suffix
+    assert!(new_id.starts_with("a1"), "expected a1 prefix after reparent, got: {}", new_id);
+
+    let new_suffix = random_suffix(&new_id); // 13 chars
+    assert_eq!(
+        new_suffix,
+        &old_suffix[..new_suffix.len()],
+        "new random suffix must be a prefix of the old random suffix"
+    );
+}
+
+#[test]
+fn modify_detach_preserves_random_infix() {
+    let dir = TempDir::new().unwrap();
+    let parent = stdout(&goal(dir.path(), &["add", "parent"])).trim().to_string();
+    let child = stdout(&goal(dir.path(), &["add", "child", "--parent", &parent])).trim().to_string();
+    // child: "a1" + 13 random chars
+    assert!(child.starts_with("a1"), "expected a1 prefix, got: {}", child);
+    let old_suffix = random_suffix(&child).to_string(); // 13 chars
+
+    let out = goal(dir.path(), &["modify", &child, "--no-parent"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let new_id = stdout(&out).trim().to_string();
+    // new: "a0" + 14 random chars — old 13 random chars are preserved, 1 new char appended
+    assert!(new_id.starts_with("a0"), "expected a0 prefix after detach, got: {}", new_id);
+
+    let new_suffix = random_suffix(&new_id); // 14 chars
+    assert_eq!(
+        &new_suffix[..old_suffix.len()],
+        old_suffix,
+        "old random suffix must appear as a prefix of the new random suffix"
+    );
+}
