@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
-use rand::RngExt;
+
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -80,7 +80,7 @@ pub fn generate_id(kind: &GoalKind, depth: u32) -> String {
     let prefix = format!("{}{}", type_char, depth_str);
     let random_len = 16usize.saturating_sub(prefix.len());
     let mut bytes = vec![0u8; (random_len + 1) / 2];
-    rand::rng().fill(&mut bytes[..]);
+    getrandom::fill(&mut bytes[..]).expect("failed to generate random bytes for goal ID");
     let random_hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     format!("{}{}", prefix, &random_hex[..random_len])
 }
@@ -108,7 +108,7 @@ pub fn derive_id(old_id: &str, new_kind: &GoalKind, new_depth: u32) -> String {
         // New prefix is shorter than old; pad the random portion with fresh bytes
         let extra_len = new_random_len - old_random.len();
         let mut bytes = vec![0u8; (extra_len + 1) / 2];
-        rand::rng().fill(&mut bytes[..]);
+        getrandom::fill(&mut bytes[..]).expect("failed to generate random bytes for goal ID");
         let extra_hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
         format!("{}{}{}", new_prefix, old_random, &extra_hex[..extra_len])
     }
@@ -116,7 +116,7 @@ pub fn derive_id(old_id: &str, new_kind: &GoalKind, new_depth: u32) -> String {
 
 pub fn generate_event_id() -> String {
     let mut bytes = [0u8; 8];
-    rand::rng().fill(&mut bytes);
+    getrandom::fill(&mut bytes).expect("failed to generate random bytes for event ID");
     let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     format!("e{}", &hex[..15])
 }
@@ -943,7 +943,7 @@ pub fn all_goals(conn: &Connection) -> Result<Vec<Goal>> {
 
 fn generate_annotation_id() -> String {
     let mut bytes = [0u8; 8];
-    rand::rng().fill(&mut bytes);
+    getrandom::fill(&mut bytes).expect("failed to generate random bytes for annotation ID");
     let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     format!("n{}", &hex[..15])
 }
